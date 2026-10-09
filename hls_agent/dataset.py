@@ -239,8 +239,11 @@ def default_dataset_roots() -> List[Path]:
 def locate_dataset(explicit: Optional[str] = None) -> Optional[Path]:
     """找到数据集根目录并返回可用的那个。
 
+    查找顺序：显式参数 > HLS_AGENT_DATASET 环境变量 > 常见默认位置。
     官方仓库解压后题目在 `hls_eval_data/` 下，但也接受直接指向该目录或仓库根。
     """
+    import os
+
     def usable(p: Path) -> bool:
         if not p.is_dir():
             return False
@@ -256,6 +259,15 @@ def locate_dataset(explicit: Optional[str] = None) -> Optional[Path]:
             if usable(p / sub):
                 return p / sub
         return None
+
+    env_root = os.environ.get("HLS_AGENT_DATASET")
+    if env_root:
+        p = Path(env_root)
+        if usable(p):
+            return p
+        for sub in ("hls_eval_data", "hls-eval-main/hls_eval_data"):
+            if usable(p / sub):
+                return p / sub
 
     for c in default_dataset_roots():
         if usable(c):

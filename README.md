@@ -185,26 +185,81 @@ git push
 ```
 AMD_HLS_Agent/              # 项目根目录
 ├── README.md               # 本说明文件
-├── hls_agent.py            # 程序入口：命令行运行这个文件
+├── hls_agent.py            # 程序入口：单题读题 → 生成 → 验证
+├── eval.py                 # 批量评测：pass@k、分组通过率、墙钟效率
+├── validate.py             # 离线模板生成代码的静态校验
+├── run.sh                  # 单题入口（智能体模式，评测方调用）
+├── run_baseline.sh         # 基线入口（单次生成、不重试、不调用工具）
+├── Dockerfile              # 提交用容器（基于赛事方官方基础镜像）
+│
 ├── hls_agent/              # Agent 主程序包
 │   ├── cli.py              # 命令行界面（读题、生成、跑 Vitis 的流程控制）
-│   ├── config.py           # 自动查找 Vitis、工作区与模型接入配置
+│   ├── config.py           # 自动查找 Vitis、工作区、模型接入配置
+│   ├── backends.py         # 可插拔模型后端（Ollama / OpenAI 兼容 / Anthropic 兼容）
+│   ├── llm.py              # 模型调用门面 + 输出代码抽取（五级回退）
 │   ├── dataset.py          # HLS-Eval 数据集扫描与题目读取
 │   ├── vitis.py            # 驱动 Vitis HLS 编译/仿真/综合 + 四级判定
-│   ├── llm.py              # 大模型客户端
 │   ├── prompts.py          # 提示词（对齐官方 HLS-Eval 协议）
 │   ├── runner.py           # 单题编排：生成 → 验证 → 失败重试
 │   ├── knowledge_base.py   # 内置离线题库（12 类标准题模板）
 │   ├── matcher.py          # 题目识别与参数抽取
 │   ├── codegen.py          # 离线模板代码生成器
 │   └── __init__.py
-├── validate.py             # 生成代码的静态校验脚本
+│
+├── serve/                  # 推理服务配置与启动脚本
+│   ├── env.example         # 环境变量示例（后端、地址、生成参数）
+│   ├── start_vllm.sh       # 带显卡机器上启动 vLLM（正式环境推荐）
+│   ├── start_ollama.sh     # Linux/macOS 启动 Ollama
+│   ├── start_ollama.bat    # Windows 启动 Ollama（开发机）
+│   └── check.py            # 推理服务连通性自检
+│
+├── skill/                  # 技能包：提示词、校验脚本、踩坑清单
+│   ├── prompt_guide.md     # 提示词模板设计说明
+│   ├── check_generated.py  # 生成代码静态预检（省 Vitis 时间）
+│   └── pitfalls.md         # 踩坑清单（现象 / 根因 / 规避）
+│
+├── model/
+│   └── MODEL.md            # 模型声明（来源、量化、显存、上下文）
+│
 ├── 题库示例.txt            # 离线题库的示例题目
 ├── requirements.txt        # Python 依赖清单
 └── .gitignore              # Git 忽略规则（不提交游戏/会话/生成产物等）
 ```
 
-> 说明：赛道提交物规划中的 `agent/`、`skill/`（技能包）、`baseline/`（基线脚本）、`run.sh`、`MODEL.md` 等文件尚未创建，后续迭代会逐步加入。
+---
+
+## 6.1 运行前先自检推理服务
+
+```bash
+python serve/check.py
+```
+
+它会探测本地 Ollama、本地 OpenAI 兼容服务（vLLM 等）、远程兼容端点，并说明程序
+会自动选中哪一个。切换模型只需改环境变量，不用改代码（详见 `serve/env.example`）。
+
+## 6.2 批量评测（pass@k）
+
+```bash
+python eval.py --variant polybench --max 5 --k 1 --mode baseline
+```
+
+```bash
+python eval.py --variant polybench --max 5 --k 5 --mode agent --attempts 3
+```
+
+结果落到 `eval_results/<时间戳>_<模式>_k<k>/`，含 `results.json`（逐次记录）和
+`summary.md`（汇总表，含 pass@1 / pass@k / 分组通过率 / 失败分析，可直接贴进设计报告）。
+
+## 6.3 生成代码静态预检
+
+跑 Vitis 之前先查一遍，能省下 20~30 秒的编译等待：
+
+```bash
+python skill/check_generated.py <生成的.cpp> --header <给定的.h> --top <函数名>
+```
+
+> 说明：赛道提交物规划中的 `agent/` 对应本项目的 `hls_agent/`（命名沿用既有代码，
+> 避免改动引入回归）。
 
 ---
 

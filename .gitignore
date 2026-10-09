@@ -42,3 +42,11 @@ amd_pdf.txt
 # 离线模板生成的可再生产物
 output/
 hls_output/
+
+# 基线输出（评测结果本身要提交，见下）
+output_baseline/
+
+# 模型权重与服务缓存
+.cache/
+ollama_models/
+hf_cache/

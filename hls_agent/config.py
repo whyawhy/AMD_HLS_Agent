@@ -28,7 +28,14 @@ DEFAULT_CLOCK_NS = 5.0
 # Vitis 定位
 # --------------------------------------------------------------------------
 
-_VITIS_HINTS = [
+# --------------------------------------------------------------------------
+# Vitis 定位（Windows 开发机 / Linux 评测机都要能用）
+# --------------------------------------------------------------------------
+
+_VITIS_VERSIONS = ["2026.1", "2025.2", "2025.1", "2024.2", "2024.1", "2023.2"]
+
+# Windows：统一用 vitis-run.bat（2024 起没有 vitis_hls 命令了）
+_VITIS_HINTS_WIN = [
     r"C:\Xilinx\Vitis\{v}\bin",
     r"D:\Xilinx\Vitis\{v}\bin",
     r"E:\Xilinx\Vitis\{v}\bin",
@@ -36,7 +43,20 @@ _VITIS_HINTS = [
     r"D:\AMDdesign\{v}\Vitis\bin",
     r"E:\AMDdesign\{v}\Vitis\bin",
 ]
-_VITIS_VERSIONS = ["2026.1", "2025.2", "2025.1", "2024.2", "2024.1", "2023.2"]
+# Linux：新旧两种安装布局 + 两种入口名
+_VITIS_HINTS_LINUX = [
+    "/tools/Xilinx/Vitis/{v}/bin",
+    "/tools/Xilinx/Vitis_HLS/{v}/bin",
+    "/opt/Xilinx/Vitis/{v}/bin",
+    "/opt/Xilinx/Vitis_HLS/{v}/bin",
+    "/opt/amd/Vitis/{v}/bin",
+    "/opt/amd/Vitis_HLS/{v}/bin",
+]
+# 按平台排序：Windows 优先用 .bat（无扩展名的是 Linux 脚本，cmd 跑不了）
+if os.name == "nt":
+    _VITIS_BINS = ("vitis-run.bat", "vitis_hls.bat", "vitis-run", "vitis_hls")
+else:
+    _VITIS_BINS = ("vitis-run", "vitis_hls")
 
 
 def _ascii_safe(p: Path) -> bool:
@@ -48,7 +68,10 @@ def _ascii_safe(p: Path) -> bool:
 
 
 def find_vitis_run(explicit: Optional[str] = None) -> Optional[Path]:
-    """定位 vitis-run 启动脚本。返回 None 表示没找到。"""
+    """定位 Vitis HLS 的命令行入口。返回 None 表示没找到。
+
+    Windows 上是 ``vitis-run.bat``，Linux 上是 ``vitis-run`` 或 ``vitis_hls``。
+    """
     candidates: List[Path] = []
 
     if explicit:
@@ -58,11 +81,18 @@ def find_vitis_run(explicit: Optional[str] = None) -> Optional[Path]:
         v = os.environ.get(var)
         if v:
             p = Path(v)
-            candidates.append(p if p.name.lower().endswith(".bat") else p / "bin" / "vitis-run.bat")
+            if p.name and p.suffix:
+                candidates.append(p)
+            else:
+                for b in _VITIS_BINS:
+                    candidates.append(p / "bin" / b)
 
+    hints = _VITIS_HINTS_WIN + _VITIS_HINTS_LINUX
     for ver in _VITIS_VERSIONS:
-        for hint in _VITIS_HINTS:
-            candidates.append(Path(hint.format(v=ver)) / "vitis-run.bat")
+        for hint in hints:
+            d = Path(hint.format(v=ver))
+            for b in _VITIS_BINS:
+                candidates.append(d / b)
 
     for c in candidates:
         if c.is_file():
@@ -70,8 +100,10 @@ def find_vitis_run(explicit: Optional[str] = None) -> Optional[Path]:
 
     # 最后看 PATH
     for d in os.environ.get("PATH", "").split(os.pathsep):
-        if d:
-            p = Path(d) / "vitis-run.bat"
+        if not d:
+            continue
+        for b in _VITIS_BINS:
+            p = Path(d) / b
             if p.is_file():
                 return p
 
@@ -144,11 +176,22 @@ def resolve_workspace(explicit: Optional[str] = None) -> Path:
 
 
 # --------------------------------------------------------------------------
-# 模型接入（Anthropic 兼容端点，默认沿用本机已有的 DeepSeek 配置）
+# 模型接入
+#
+# 赛道要求模型可本地部署，所以默认优先级是「本地 Ollama > 本地 OpenAI 兼容服务
+# > 远程兼容端点」。接入本地模型只需：
+#     1. 启动 serve/ 里的服务（如 ollama serve）
+#     2. 设置 HLS_AGENT_BACKEND=ollama 和 HLS_AGENT_MODEL=qwen2.5-coder:7b
+# 代码无需改动。
 # --------------------------------------------------------------------------
 
 DEFAULT_LLM_BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_LLM_MODEL = "deepseek-v4-pro"
+
+# 本地推理服务的默认地址
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000"  # vLLM / LM Studio / llama.cpp server
+DEFAULT_LOCAL_MODEL = "qwen2.5-coder:7b"
 
 # 本机 Claude Code 的配置文件，里面也有 ANTHROPIC_* 设置。
 # 进程环境里的 ANTHROPIC_BASE_URL 可能指向 Claude Desktop 的本地代理
@@ -252,19 +295,34 @@ def _find_host_creds() -> dict:
 
 @dataclass
 class LLMConfig:
-    base_url: str = DEFAULT_LLM_BASE_URL
-    api_key: str = ""
+    # 后端选择：auto（本地优先）/ ollama / openai / anthropic
+    backend: str = "auto"
     model: str = DEFAULT_LLM_MODEL
     max_tokens: int = 16384
     temperature: float = 0.2
     timeout_s: int = 300
 
+    # 各后端的地址与凭证
+    ollama_host: str = DEFAULT_OLLAMA_HOST
+    openai_base_url: str = DEFAULT_OPENAI_BASE_URL
+    base_url: str = DEFAULT_LLM_BASE_URL  # anthropic 兼容端点
+    api_key: str = ""
+
     @classmethod
     def from_env(cls) -> "LLMConfig":
-        """解析顺序：host 凭证（Claude Desktop 本地网关，即"当前会话接入的大模型"）
-        > 环境变量 > ~/.claude/settings.json > 内置默认值。"""
+        """从环境变量解析配置，缺省值保证「本地优先」。
+
+        常用环境变量：
+            HLS_AGENT_BACKEND        auto / ollama / openai / anthropic
+            HLS_AGENT_MODEL          模型名，如 qwen2.5-coder:7b
+            HLS_AGENT_OLLAMA_HOST    Ollama 地址（默认 127.0.0.1:11434）
+            HLS_AGENT_OPENAI_BASE_URL vLLM 等 OpenAI 兼容服务地址
+            HLS_AGENT_BASE_URL       Anthropic 兼容端点
+            HLS_AGENT_API_KEY        远程端点的 Key
+            HLS_AGENT_MAX_TOKENS     单次输出上限
+            HLS_AGENT_LLM_TIMEOUT    单次调用超时秒数
+        """
         saved = _load_settings_env()
-        host = _find_host_creds()
 
         def pick(*names: str, default: str = "") -> str:
             for n in names:
@@ -277,50 +335,61 @@ class LLMConfig:
                     return v
             return default
 
-        # 1) 显式指定（HLS_AGENT_*）永远优先
+        backend = (os.environ.get("HLS_AGENT_BACKEND") or "auto").lower()
+
+        # --- anthropic 端点解析（只有该后端或兜底时才需要）---
+        host = _find_host_creds()
         if os.environ.get("HLS_AGENT_BASE_URL"):
             base = os.environ["HLS_AGENT_BASE_URL"]
             key = os.environ.get("HLS_AGENT_API_KEY", "")
-        # 2) host 凭证：Claude Desktop 本地网关，与当前会话同一模型接入
         elif host.get("ANTHROPIC_BASE_URL") and host.get("ANTHROPIC_AUTH_TOKEN"):
             base = host["ANTHROPIC_BASE_URL"]
             key = host["ANTHROPIC_AUTH_TOKEN"]
         else:
             base = pick("ANTHROPIC_BASE_URL", default=DEFAULT_LLM_BASE_URL)
             key = pick("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
-            # 本地代理端口若没有配套 key（host 凭证缺失），回落到配置文件
             if ("127.0.0.1" in base or "localhost" in base) and not key:
                 base = saved.get("ANTHROPIC_BASE_URL", DEFAULT_LLM_BASE_URL)
                 if "127.0.0.1" in base or "localhost" in base:
                     base = DEFAULT_LLM_BASE_URL
 
-        max_tokens = 16384
-        raw = os.environ.get("HLS_AGENT_MAX_TOKENS", "")
-        if raw.isdigit():
-            max_tokens = int(raw)
+        # --- 模型名 ---
+        # 本地后端用本地模型名，远程端点用其自己的模型名
+        if backend in ("ollama", "openai"):
+            default_model = DEFAULT_LOCAL_MODEL
+        else:
+            default_model = DEFAULT_LLM_MODEL
+        model = pick("HLS_AGENT_MODEL", "ANTHROPIC_MODEL", default=default_model)
 
-        timeout_s = 300
-        raw_t = os.environ.get("HLS_AGENT_LLM_TIMEOUT", "")
-        if raw_t.isdigit():
-            timeout_s = int(raw_t)
-
-        # 模型名：显式指定 > settings.json > 默认；走本地网关时映射成网关别名
-        model = pick("HLS_AGENT_MODEL", "ANTHROPIC_MODEL", default=DEFAULT_LLM_MODEL)
+        # 走 Claude Desktop 网关时，模型名要映射成网关别名
         routes = _gateway_routes()
-        if "127.0.0.1" in base or "localhost" in base or routes.get("inferenceGatewayBaseUrl") == base.rstrip("/"):
+        on_gateway = (
+            "127.0.0.1" in base
+            or "localhost" in base
+            or routes.get("inferenceGatewayBaseUrl", "").rstrip("/") == base.rstrip("/")
+        )
+        if on_gateway and backend in ("auto", "anthropic"):
             model = _gateway_model_alias(routes, model)
 
+        def _int_env(name: str, fallback: int) -> int:
+            raw = os.environ.get(name, "")
+            return int(raw) if raw.isdigit() else fallback
+
         return cls(
+            backend=backend,
+            model=model,
+            max_tokens=_int_env("HLS_AGENT_MAX_TOKENS", 16384),
+            timeout_s=_int_env("HLS_AGENT_LLM_TIMEOUT", 300),
+            ollama_host=os.environ.get("HLS_AGENT_OLLAMA_HOST", DEFAULT_OLLAMA_HOST).rstrip("/"),
+            openai_base_url=os.environ.get(
+                "HLS_AGENT_OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL
+            ).rstrip("/"),
             base_url=base.rstrip("/"),
             api_key=key,
-            model=model,
-            max_tokens=max_tokens,
-            timeout_s=timeout_s,
         )
 
     def describe(self) -> str:
-        key = "已配置" if self.api_key else "缺失"
-        return f"{self.model} @ {self.base_url} (API Key: {key})"
+        return f"backend={self.backend} model={self.model} (按需探测)"
 
 
 # --------------------------------------------------------------------------

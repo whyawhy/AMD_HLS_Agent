@@ -1,0 +1,48 @@
+{
+  "mode": "agent",
+  "k": 1,
+  "attempts": 2,
+  "do_synth": false,
+  "model": "claude-fable-5",
+  "backend": "auto",
+  "part": "xczu3eg-sbva484-1-e",
+  "clock_ns": 5.0,
+  "tasks": [
+    "2mm",
+    "3mm"
+  ],
+  "records": [
+    {
+      "task": "2mm",
+      "variant": "hls_polybench__fixed__small",
+      "run_index": 1,
+      "passed": true,
+      "parse": true,
+      "compile": true,
+      "run": true,
+      "synth": null,
+      "dump_ok": true,
+      "attempts": 1,
+      "elapsed_s": 148.0269227027893,
+      "gen_time_s": 123.17832255363464,
+      "error": ""
+    },
+    {
+      "task": "3mm",
+      "variant": "hls_polybench__fixed__small",
+      "run_index": 1,
+      "passed": true,
+      "parse": true,
+      "compile": true,
+      "run": true,
+      "synth": null,
+      "dump_ok": true,
+      "attempts": 1,
+      "elapsed_s": 117.29013895988464,
+      "gen_time_s": 94.7333300113678,
+      "error": ""
+    }
+  ],
+  "started_at": "2026-10-09 19:53:16",
+  "total_elapsed_s": 265.31706166267395
+}
