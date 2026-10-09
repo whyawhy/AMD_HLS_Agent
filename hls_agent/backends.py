@@ -81,11 +81,26 @@ class LLMBackend(ABC):
     name: str = "base"
 
     def __init__(self, model: str, max_tokens: int = 16384,
-                 temperature: float = 0.2, timeout_s: int = 300):
+                 temperature: float = 0.2, timeout_s: int = 300,
+                 thinking: str = "off"):
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.timeout_s = timeout_s
+        # 思考控制：off / budget:N。推理模型的思考 token 是生成时间的主要来源，
+        # 实测关闭思考后输出 token 减半以上。
+        self.thinking = thinking
+
+    def _thinking_payload(self) -> dict:
+        """Anthropic 风格端点的 thinking 参数。"""
+        t = self.thinking.strip().lower()
+        if t in ("off", "disabled", "none", "0"):
+            return {"thinking": {"type": "disabled"}}
+        if t.startswith("budget:"):
+            n = t.split(":", 1)[1].strip()
+            if n.isdigit() and int(n) > 0:
+                return {"thinking": {"type": "enabled", "budget_tokens": int(n)}}
+        return {}
 
     @abstractmethod
     def endpoint(self) -> str:
@@ -258,6 +273,7 @@ class AnthropicBackend(LLMBackend):
             "temperature": self.temperature if temperature is None else temperature,
             "messages": list(messages),
         }
+        payload.update(self._thinking_payload())
         if system:
             payload["system"] = system
         headers = {

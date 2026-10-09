@@ -69,7 +69,8 @@ class LLMClient:
 def _make_backend(cfg: LLMConfig) -> LLMBackend:
     """按 cfg.backend 构造后端；auto 时按可用性依次尝试。"""
     common = dict(model=cfg.model, max_tokens=cfg.max_tokens,
-                  temperature=cfg.temperature, timeout_s=cfg.timeout_s)
+                  temperature=cfg.temperature, timeout_s=cfg.timeout_s,
+                  thinking=cfg.thinking)
 
     kind = (cfg.backend or "auto").lower()
 
@@ -101,7 +102,8 @@ def _make_backend(cfg: LLMConfig) -> LLMBackend:
 def probe_backends(cfg: LLMConfig) -> List[tuple[str, bool, str]]:
     """探测各后端可用性，返回 [(名称, 可用, 说明)]。供 CLI 诊断用。"""
     common = dict(model=cfg.model, max_tokens=cfg.max_tokens,
-                  temperature=cfg.temperature, timeout_s=cfg.timeout_s)
+                  temperature=cfg.temperature, timeout_s=cfg.timeout_s,
+                  thinking=cfg.thinking)
     out = []
     for b in (
         OllamaBackend(host=cfg.ollama_host, **common),

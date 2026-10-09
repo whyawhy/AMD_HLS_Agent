@@ -214,3 +214,56 @@ XML 语义——在 XML 里 `<` 必须转义成 `&lt;`。而我们的抽取器�
 `hls_agent/vitis.py::run_csim` 严格按这个顺序做，分别记录两个阶段的返回码，
 对应赛道的「可编译」和「可运行」两级判定。若合并成一次 `csim_design`，
 就丢失了中间判据。
+
+---
+
+## 10. 推理模型的思考 token 是生成时间的主要来源
+
+**现象**
+
+单题总墙钟 100~150 秒，其中模型生成占 70~90%。查看响应发现输出 token 里
+`thinking` 块和正文差不多长甚至更长——思考内容对最终代码没有贡献，却占了一半以上
+的生成时间。
+
+**根因**
+
+推理模型（本机网关底层是 `deepseek-v4-pro`）在输出正文之前会先生成大段思考，
+按 token 计费也按 token 耗时。
+
+**规避**
+
+调用时传 `thinking: {"type": "disabled"}`（Anthropic Messages 接口），
+或 `budget:N` 给思考限定预算。实测效果：
+
+| 配置 | 2mm 生成耗时 | 2mm 总墙钟 | 结果 |
+| --- | --- | --- | --- |
+| 思考开启（默认） | 76~148 s | 100~148 s | 通过 |
+| 思考关闭 | **5.2 s** | **27 s** | 通过，数值完全一致 |
+
+即 **5 倍以上提速，质量无损失**（2mm/3mm/chstone 均已验证）。
+
+本项目中通过 `HLS_AGENT_THINKING=off`（默认）/ `budget:N` 控制，
+见 `serve/env.example` 与 `hls_agent/backends.py::_thinking_payload`。
+若遇到难题质量下降，把该题改用 `budget:2048` 或开启思考重跑即可。
+
+**注意**：切到本地模型（如 qwen2.5-coder）后行为会不同——有些模型没有思考模式，
+有些（qwen3）通过 `think: false` 关闭。接入新模型时要实测一次耗时构成。
+
+---
+
+## 11. 不要试图绕过 Vitis 用别的编译器做快速验证（Windows）
+
+**现象/结论**
+
+想用 Vitis 自带的 mingw g++ 或 clang 直接编译内核+测试台，绕过 Vitis 工程启动
+的 ~10 秒开销。实测：
+
+- Vitis 的 clang-16 只 target `x86_64-pc-windows-msvc`，本机没有 MSVC SDK，
+  直接调用要么报 DLL 缺失（`sqlite3.51.1.dll`），要么落到 C++IDE 的 STL 上报
+  「STL1000: Unexpected compiler version」；Vitis 内部靠 `-hls` 特殊模式 +
+  一整套环境变量才能工作，复刻成本高。
+- mingw g++ 能编过且**数值结果与 Vitis csim 完全一致**（2mm 最大绝对误差同为
+  0.054072），但编译耗时 **28 秒**（ap_fixed 模板实例化），比 Vitis 的 ~17 秒还慢。
+
+**结论**：Windows 上「绕过 Vitis 加速编译验证」这条路不通。要降总时间，
+去砍模型生成时间（见第 10 条，5 倍收益），Vitis 的 ~17 秒是工具固定成本。

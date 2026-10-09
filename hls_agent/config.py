@@ -302,6 +302,11 @@ class LLMConfig:
     temperature: float = 0.2
     timeout_s: int = 300
 
+    # 思考控制（推理模型生成时间的主要来源）：
+    #   off      完全不输出思考（最快，实测输出 token 减半以上）
+    #   budget:N 给思考 N token 预算（质量与速度折中）
+    thinking: str = "off"
+
     # 各后端的地址与凭证
     ollama_host: str = DEFAULT_OLLAMA_HOST
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
@@ -380,6 +385,7 @@ class LLMConfig:
             model=model,
             max_tokens=_int_env("HLS_AGENT_MAX_TOKENS", 16384),
             timeout_s=_int_env("HLS_AGENT_LLM_TIMEOUT", 300),
+            thinking=os.environ.get("HLS_AGENT_THINKING", "off"),
             ollama_host=os.environ.get("HLS_AGENT_OLLAMA_HOST", DEFAULT_OLLAMA_HOST).rstrip("/"),
             openai_base_url=os.environ.get(
                 "HLS_AGENT_OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL
