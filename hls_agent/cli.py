@@ -192,6 +192,7 @@ def _build_cfg(args: argparse.Namespace) -> AgentConfig:
         csim_timeout_s=args.csim_timeout,
         csynth_timeout_s=args.synth_timeout,
         verbose=not args.quiet,
+        strict_dump=not args.official_pass,
         llm=LLMConfig.from_env(),
     )
 
@@ -446,6 +447,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 流程控制
     p.add_argument("--attempts", type=int, default=3, help="失败重试上限（默认 3）")
     p.add_argument("--synth", action="store_true", help="额外跑 csynth，评估「可综合」")
+    p.add_argument(
+        "--official-pass", action="store_true",
+        help="官方口径：只认 csim 返回码，不做数值比对（默认严格判定）",
+    )
     p.add_argument("--baseline", action="store_true", help="基线模式：单次生成、不重试")
     p.add_argument("--dry-run", action="store_true", help="只生成代码，不调用 Vitis")
 
@@ -454,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vitis", help="vitis-run.bat 路径（默认自动查找）")
     p.add_argument("--part", default=DEFAULT_PART, help=f"目标器件（默认 {DEFAULT_PART}）")
     p.add_argument("--clock", type=float, default=DEFAULT_CLOCK_NS, help="时钟周期 ns（默认 5）")
-    p.add_argument("--csim-timeout", type=int, default=600, help="csim 超时秒数（默认 600）")
+    p.add_argument("--csim-timeout", type=int, default=240, help="csim 超时秒数（默认 240）")
     p.add_argument("--synth-timeout", type=int, default=1800, help="csynth 超时秒数（默认 1800）")
     p.add_argument("--quiet", action="store_true", help="精简输出")
 

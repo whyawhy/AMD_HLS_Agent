@@ -69,9 +69,10 @@ class RunRecord:
     run: Optional[bool]
     synth: Optional[bool]
     dump_ok: bool
-    attempts: int
-    elapsed_s: float
-    gen_time_s: float
+    dump_detail: str = ""
+    attempts: int = 0
+    elapsed_s: float = 0.0
+    gen_time_s: float = 0.0
     error: str = ""
 
     @property
@@ -86,10 +87,11 @@ class EvalReport:
     k: int
     attempts: int
     do_synth: bool
-    model: str
-    backend: str
-    part: str
-    clock_ns: float
+    official_pass: bool = False
+    model: str = ""
+    backend: str = ""
+    part: str = ""
+    clock_ns: float = 0.0
     tasks: List[str] = field(default_factory=list)
     records: List[RunRecord] = field(default_factory=list)
     started_at: str = ""
@@ -180,6 +182,7 @@ def _cfg(args: argparse.Namespace) -> AgentConfig:
         csim_timeout_s=args.csim_timeout,
         csynth_timeout_s=args.synth_timeout,
         verbose=False,
+        strict_dump=not args.official_pass,
         llm=LLMConfig.from_env(),
     )
 
@@ -205,6 +208,7 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
         k=args.k,
         attempts=1 if args.mode == "baseline" else max(1, args.attempts),
         do_synth=args.synth,
+        official_pass=args.official_pass,
         model=cfg.llm.model,
         backend=cfg.llm.backend,
         part=cfg.part,
@@ -215,10 +219,22 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
 
     t_all = time.time()
     total_runs = len(tasks) * args.k
+    budget = args.max_total_time if args.max_total_time > 0 else None
 
     for ti, task in enumerate(tasks, 1):
         for k in range(1, args.k + 1):
             idx = (ti - 1) * args.k + k
+            # 总时间预算：超时后剩余题目记为跳过，不再消耗模型额度和 Vitis 时间
+            if budget is not None and (time.time() - t_all) > budget:
+                print(f"  [跳过] 超出总时间预算（{budget}s），剩余 {total_runs - idx + 1} 次运行未执行", flush=True)
+                rec = RunRecord(
+                    task=task.name, variant=task.variant, run_index=k,
+                    passed=False, parse=None, compile=None, run=None, synth=None,
+                    dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
+                    error=f"跳过（超出总时间预算 {budget}s）",
+                )
+                rep.records.append(rec)
+                continue
             print(f"  [{idx}/{total_runs}] {task.name}  第 {k}/{args.k} 轮 ...", flush=True)
             try:
                 r = run_task(
@@ -241,6 +257,7 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
                     run=g.run,
                     synth=g.synth,
                     dump_ok=r.dump_ok,
+                    dump_detail=r.dump_detail,
                     attempts=len(r.attempts),
                     elapsed_s=r.elapsed_s,
                     gen_time_s=r.gen_time_s,
@@ -280,6 +297,9 @@ def render_summary(rep: EvalReport) -> str:
     L.append(f"- 模式：**{rep.mode}**（{'单次生成、不重试、不看工具反馈' if rep.mode == 'baseline' else f'带工具反馈，失败重试至多 {rep.attempts} 次'}）")
     L.append(f"- 采样轮数 k：{rep.k}")
     L.append(f"- 是否评估综合：{'是' if rep.do_synth else '否'}")
+    L.append(
+        f"- 判定口径：{'官方（只认 csim 返回码）' if rep.official_pass else '严格（数值与参考 dump 一致才算通过）'}"
+    )
     L.append(f"- 模型：`{rep.model}`（backend={rep.backend}）")
     L.append(f"- 器件：`{rep.part}`，时钟 {rep.clock_ns:g} ns")
     L.append(f"- 题目数：{len(rep.tasks)}")
@@ -400,13 +420,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="agent=带工具反馈与重试；baseline=单次生成不重试",
     )
     p.add_argument("--synth", action="store_true", help="额外跑 csynth（评估可综合）")
+    p.add_argument(
+        "--official-pass", action="store_true",
+        help="官方口径：只认 csim 返回码，不比数值（默认严格判定，数值一致才算过）",
+    )
     p.add_argument("--outdir", default="eval_results", help="结果输出根目录")
     p.add_argument("--workspace", help="Vitis 工作区（纯 ASCII 路径）")
     p.add_argument("--vitis", help="vitis-run 路径（默认自动查找）")
     p.add_argument("--part", default=None, help="目标器件")
     p.add_argument("--clock", type=float, default=None, help="时钟周期 ns")
-    p.add_argument("--csim-timeout", type=int, default=600)
+    p.add_argument("--csim-timeout", type=int, default=240)
     p.add_argument("--synth-timeout", type=int, default=1800)
+    p.add_argument(
+        "--max-total-time", type=int, default=0,
+        help="整批评测的总时间预算（秒，默认 0 = 不限）。超时后剩余题目记为跳过",
+    )
     return p
 
 

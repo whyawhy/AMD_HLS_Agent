@@ -416,9 +416,12 @@ class AgentConfig:
     clock_ns: float = DEFAULT_CLOCK_NS
     workspace: Path = field(default_factory=resolve_workspace)
     vitis_run: Optional[Path] = field(default_factory=_default_vitis_run)
-    csim_timeout_s: int = 600
+    csim_timeout_s: int = 240
     csynth_timeout_s: int = 1800
     verbose: bool = False
+    # 严格判定：数值与参考 dump 一致才算通过（官方只认 csim 返回码，
+    # 但 dump 型 testbench 不检查数值，功能错误的代码也会「可运行」）
+    strict_dump: bool = True
     llm: LLMConfig = field(default_factory=LLMConfig.from_env)
 
     def vitis_ready(self) -> bool:

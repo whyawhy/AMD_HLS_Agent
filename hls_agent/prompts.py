@@ -102,6 +102,39 @@ def build_prompt_gen_zero_shot(
 
 
 # --------------------------------------------------------------------------
+# 技能包领域知识（仅智能体模式附加；基线模式不带，保持官方口径可比）
+# 来源：skill/pitfalls.md 第 11、12 条——批量评测中 correlation/covariance
+# 因定点除法误差爆炸（8153%）与除零崩溃得到的教训。
+# --------------------------------------------------------------------------
+
+AGENT_SKILL_SYSTEM = dedent(
+    """
+## Fixed-Point Numerics Rules (learned from real failures)
+
+The target type is `ap_fixed` and every operation rounds. When the kernel involves
+division or square roots, follow these rules:
+
+1. Minimize division count. Mathematically equivalent formulas can differ by
+   orders of magnitude in fixed-point error. Prefer restructuring to perform
+   division once — e.g. for statistical kernels (correlation, covariance),
+   normalize the data first (`data /= sqrt(n) * stddev`), then the result is a
+   plain dot product with no further division.
+2. Protect denominators: before dividing, guard with `if (denom > eps) ... else 0;`
+   where eps is a small constant like 0.1. A zero denominator causes a runtime
+   divide-by-zero crash in the testbench.
+3. Use `hls::sqrt()` from "hls_math.h" for square roots on fixed-point types,
+   never `std::sqrt`.
+4. Do NOT introduce `float` or `double` intermediates. Accumulate in a wider
+   fixed-point type (e.g. `ap_fixed<64,32>`) and cast back to `t_ap_fixed` only
+   when storing to the output arrays.
+
+These rules apply to the kernel implementation only. Do not modify the header or
+the testbench.
+"""
+).strip()
+
+
+# --------------------------------------------------------------------------
 # 重试：在官方提示后追加编译/仿真反馈
 # --------------------------------------------------------------------------
 

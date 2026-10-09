@@ -33,7 +33,6 @@ from .vitis import (
     run_csim,
     run_synth,
 )
-
 # --------------------------------------------------------------------------
 # 判定辅助
 # --------------------------------------------------------------------------
@@ -108,6 +107,40 @@ def load_error_tolerance(task: Task) -> Optional[float]:
     return max(vals) if vals else None
 
 
+def _dump_mismatch_detail(
+    got: Dict[str, List[float]], ref: Dict[str, List[float]], tol: float, sample: int = 6
+) -> str:
+    """数值不符时的重试反馈：给模型看参考值 vs 实际值的前几个样例。
+
+    只告诉模型「数值不符」没用——它不知道差多少、差在哪。给出具体数值后，
+    模型能立刻判断是精度问题（差 1e-3 量级）还是算法问题（差几个数量级），
+    修复成功率明显更高。
+    """
+    lines = [f"数值与参考输出不符（相对容差 {tol:g}）。逐数组对比："]
+    for name, rv in ref.items():
+        gv = got.get(name)
+        if not gv or len(gv) != len(rv):
+            lines.append(f"- {name}: 长度不符 实际 {len(gv) if gv else 0} vs 参考 {len(rv)}")
+            continue
+        pairs = list(zip(gv, rv))
+        max_idx = max(range(len(pairs)), key=lambda i: abs(pairs[i][0] - pairs[i][1]))
+        worst = pairs[max_idx]
+        lines.append(
+            f"- {name}: 最大误差在索引 {max_idx}，实际 {worst[0]:.6g} vs 参考 {worst[1]:.6g}"
+        )
+        lines.append(
+            f"  参考前 {sample} 个值: " + " ".join(f"{v:.4g}" for _, v in pairs[:sample])
+        )
+        lines.append(
+            f"  实际前 {sample} 个值: " + " ".join(f"{v:.4g}" for v, _ in pairs[:sample])
+        )
+    lines.append(
+        "请检查：算法是否与题目描述一致；定点运算下除法/开方的次数是否过多"
+        "（数学等价的公式在定点下误差可能差几个数量级，参考实现通常先归一化再点积）。"
+    )
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 # 报告
 # --------------------------------------------------------------------------
@@ -142,7 +175,13 @@ class TaskReport:
 
     @property
     def passed(self) -> bool:
-        return bool(self.grade.run)
+        """严格口径：可运行 且 数值与参考一致。
+
+        官方评测只认 csim 返回码，但 dump 型 testbench 不检查数值，
+        功能错误的代码也会「可运行」。作为参赛队要保证功能正确，
+        所以把 dump 比对纳入通过条件（config.strict_dump=False 可关闭）。
+        """
+        return bool(self.grade.run and self.dump_ok)
 
     def headline(self) -> str:
         n = len(self.attempts)
@@ -233,7 +272,17 @@ def run_task(
 
         t_gen = time.time()
         try:
-            raw = client.complete(system="", messages=[{"role": "user", "content": prompt}])
+            # 第一次尝试用低温度求稳；重试时提高温度增加多样性，
+            # 避免模型在同一个错误上打转
+            retry_temp = None if i == 1 else 0.7
+            # 智能体模式附加技能包领域知识（定点数值规则）；基线模式不带，
+            # 保持与官方 zero-shot 口径可比——差值就是「增益」的一部分
+            skill_system = prompts.AGENT_SKILL_SYSTEM if use_skill else ""
+            raw = client.complete(
+                system=skill_system,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=retry_temp,
+            )
             (workdir / f"raw_llm_output_{i}.txt").write_text(raw, encoding="utf-8", newline="\n")
             att.code = extract_source(raw, task.source_name, task.top)
         except Exception as e:
@@ -271,6 +320,26 @@ def run_task(
             )
             continue
 
+        # ---- 静态预检：毫秒级，阻断项直接回灌重试，省掉一次 Vitis 往返（~20s）----
+        from .static_check import check as static_check
+
+        sc = static_check(att.code, workdir / task.header_name, task.top)
+        if not sc.ok:
+            att.result = HlsResult(project_dir=workdir, grade=Grade(parse=True, compile=False, run=False))
+            report.attempts.append(att)
+            if not use_skill:
+                break
+            if verbose:
+                for line in sc.render().splitlines()[:6]:
+                    print(f"    {line}")
+            prompt = prompts.build_retry_prompt(
+                base_prompt,
+                sc.retry_hint(task.top, task.header_name),
+                att.code,
+                task.source_name,
+            )
+            continue
+
         # ---- 编译 + 仿真 ----
         if verbose:
             print(f"  [尝试 {i}] 编译并运行 testbench ...", flush=True)
@@ -294,18 +363,52 @@ def run_task(
 
         att.result = res
 
+        # ---- 环境受限检测：Windows 缺 libhlsmc DLL（hls::sqrt 等数学函数触发）----
+        # 0xC0000135 (STATUS_DLL_NOT_FOUND) 且无任何输出 = 运行前 DLL 加载失败，
+        # 重试不会有好结果（编译每次都成功），直接停止，避免浪费额度与时间
+        env_limited = False
+        if (
+            res.run is not None
+            and res.run.return_code == 3221225781
+            and not (res.run.stdout or res.run.stderr)
+        ):
+            env_limited = True
+            if verbose:
+                print(
+                    "  [环境] csim.exe 因缺少 libhlsmc DLL 无法运行"
+                    "（代码用了 hls::sqrt 等数学函数，Windows 本机的 Vitis 缺该 DLL；"
+                    "Linux 评测环境无此问题）。已停止重试。",
+                    flush=True,
+                )
+            att.result.run = ExecResult(
+                return_code=res.run.return_code,
+                stdout=res.run.stdout,
+                stderr=(
+                    "环境受限：csim.exe 缺少 libhlsmc++-GCC95-x64.dll 无法运行"
+                    "（hls 数学函数触发，Windows 本机 Vitis 缺失该 DLL，"
+                    "Linux 评测环境正常）"
+                ),
+                elapsed_s=res.run.elapsed_s,
+            )
+            att.dump_ok, att.dump_detail = True, ""
+            report.attempts.append(att)
+            break
+
         # ---- 数值比对 ----
         if res.grade.run and ref_dump:
             att.dump_ok, att.dump_detail = compare_dumps(res.dumps, ref_dump)
             if not att.dump_ok:
-                att.dump_detail = f"数值不符（容差 {tol if tol is not None else 1e-3:g}）：" + att.dump_detail
+                att.dump_detail = _dump_mismatch_detail(
+                    res.dumps, ref_dump, tol if tol is not None else 1e-3
+                )
         else:
             att.dump_ok, att.dump_detail = True, ""
 
         report.attempts.append(att)
 
-        # 通过条件：可运行 + 数值一致
-        if res.grade.run and att.dump_ok:
+        # 通过条件：可运行 +（严格模式）数值一致
+        passed = res.grade.run and (att.dump_ok or not cfg.strict_dump)
+        if passed:
             break
         if not use_skill:
             break
