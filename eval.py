@@ -320,6 +320,14 @@ def render_summary(rep: EvalReport) -> str:
     L.append(f"| 单次平均墙钟 | {wc['mean']:.1f} s |")
     L.append(f"| 单次最长墙钟 | {wc['max']:.1f} s |")
     L.append("")
+    # 机器休眠会让墙钟暴涨（monotonic 在 Windows 上同样包含休眠时间），
+    # 单题远超合理上限时给出提示，避免把污染数据当真实性能写进报告
+    if wc["max"] > 1800:
+        L.append(
+            f"> ⚠️ 存在单次墙钟 {wc['max']:.0f}s 的样本，远超合理上限（约 1~2 分钟/题）。"
+            "多半是评测机中途休眠导致墙钟污染，该样本的耗时不可信，建议重跑该题。"
+        )
+        L.append("")
 
     L.append("## 分级判定分布")
     L.append("")

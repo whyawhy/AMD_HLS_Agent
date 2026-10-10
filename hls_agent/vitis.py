@@ -100,6 +100,10 @@ class TaskPaths:
     build_name: str
     source_name: str  # 生成的内核 .cpp
     other_sources: List[str] = field(default_factory=list)  # 数据集带来的头文件/tb
+    # testbench 用相对路径读的数据文件（如 MachSuite 的 input.data / check.data）。
+    # csim.exe 是以 csim build 目录为工作目录运行的，这些文件必须先搬进去，
+    # 否则 open("input.data") 会失败（表现为 assert "Couldn't open input data file"）。
+    stage_files: List[str] = field(default_factory=list)
 
     @property
     def project_name(self) -> str:
@@ -372,6 +376,16 @@ def run_csim(
         )
         res.elapsed_s = time.time() - t0
         return res
+
+    # testbench 可能用相对路径读数据文件；csim.exe 以本目录为 cwd 运行，
+    # 所以先把这些文件搬进来
+    for name in paths.stage_files:
+        src = paths.workdir / name
+        if src.is_file():
+            try:
+                shutil.copy2(src, exe.parent / name)
+            except OSError:
+                pass
 
     run_res = _run(
         [str(exe)],

@@ -127,6 +127,18 @@ division or square roots, follow these rules:
 4. Do NOT introduce `float` or `double` intermediates. Accumulate in a wider
    fixed-point type (e.g. `ap_fixed<64,32>`) and cast back to `t_ap_fixed` only
    when storing to the output arrays.
+5. Watch the representable range. `ap_fixed<32,16>` can only hold about ±32768.
+   Iterative kernels (LU, Jacobi, Gram-Schmidt, triangular solves) accumulate
+   quickly and will **saturate** at ±32768, producing obviously wrong output.
+   If a sum or product can exceed that range, accumulate in `ap_fixed<64,32>`
+   (or rescale) rather than letting it saturate.
+6. Reproduce the described algorithm **exactly**, do not substitute an equivalent
+   one. Some testbenches compare results bit-for-bit against a reference
+   implementation, so a different-but-mathematically-correct method still fails.
+   If the description mentions lookup tables, named constant tables, shift counts,
+   or specific iteration counts, implement them literally. Pay special attention
+   to boundary inputs (0, all-ones, negative zero, NaN) — these are usually
+   special-cased in the reference.
 
 These rules apply to the kernel implementation only. Do not modify the header or
 the testbench.

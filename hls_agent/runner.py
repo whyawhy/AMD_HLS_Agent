@@ -107,16 +107,34 @@ def load_error_tolerance(task: Task) -> Optional[float]:
     return max(vals) if vals else None
 
 
+# ap_fixed<32,16> 的整数位是 16 位（含符号），取值范围 ±2^15 = ±32768。
+# 迭代/累加类内核一旦中间结果越界就会**饱和**到边界值，输出里会出现
+# ±32768 附近的数——这是溢出的指纹，不是精度问题。
+_FIXED_SATURATION = 32768.0
+
+
+def _detect_saturation(vals: List[float]) -> Optional[float]:
+    """返回饱和迹象最强的那个值（接近 ±32768），没有则返回 None。"""
+    if not vals:
+        return None
+    edge = [v for v in vals if abs(abs(v) - _FIXED_SATURATION) < _FIXED_SATURATION * 0.01]
+    if not edge:
+        return None
+    return max(edge, key=abs)
+
+
 def _dump_mismatch_detail(
     got: Dict[str, List[float]], ref: Dict[str, List[float]], tol: float, sample: int = 6
 ) -> str:
     """数值不符时的重试反馈：给模型看参考值 vs 实际值的前几个样例。
 
     只告诉模型「数值不符」没用——它不知道差多少、差在哪。给出具体数值后，
-    模型能立刻判断是精度问题（差 1e-3 量级）还是算法问题（差几个数量级），
+    模型能立刻判断是精度问题（差 1e-3 量级）还是溢出/算法问题（差几个数量级），
     修复成功率明显更高。
     """
     lines = [f"数值与参考输出不符（相对容差 {tol:g}）。逐数组对比："]
+    sat_hit: Optional[float] = None
+
     for name, rv in ref.items():
         gv = got.get(name)
         if not gv or len(gv) != len(rv):
@@ -134,10 +152,27 @@ def _dump_mismatch_detail(
         lines.append(
             f"  实际前 {sample} 个值: " + " ".join(f"{v:.4g}" for v, _ in pairs[:sample])
         )
-    lines.append(
-        "请检查：算法是否与题目描述一致；定点运算下除法/开方的次数是否过多"
-        "（数学等价的公式在定点下误差可能差几个数量级，参考实现通常先归一化再点积）。"
-    )
+        s = _detect_saturation(gv)
+        if s is not None and (sat_hit is None or abs(s) > abs(sat_hit)):
+            sat_hit = s
+
+    if sat_hit is not None:
+        lines.append("")
+        lines.append(
+            f"**检测到定点饱和**：实际输出里出现了 {sat_hit:.6g}，非常接近 "
+            f"t_ap_fixed（ap_fixed<32,16>）的取值范围边界 ±32768。"
+            f"这说明中间计算结果**溢出饱和**了，不是舍入精度问题。"
+        )
+        lines.append(
+            "修复方向：把中间累加变量换成更宽的类型（例如 "
+            "`typedef ap_fixed<64,32> t_acc;` 并用它累积，最后再转回 t_ap_fixed），"
+            "或者调整算法避免数值增长（如先归一化、提取公因子）。"
+        )
+    else:
+        lines.append(
+            "请检查：算法是否与题目描述一致；定点运算下除法/开方的次数是否过多"
+            "（数学等价的公式在定点下误差可能差几个数量级，参考实现通常先归一化再点积）。"
+        )
     return "\n".join(lines)
 
 
@@ -242,6 +277,9 @@ def run_task(
         build_name=task.top,
         source_name=task.source_name,
         other_sources=[task.header_name, task.tb_name],
+        # testbench 用相对路径读的数据文件（MachSuite 的 input.data/check.data），
+        # 运行时必须先搬进 csim build 目录
+        stage_files=[f.name for f in task.tb_data],
     )
 
     report = TaskReport(task=task, project_dir=workdir, mode=mode)

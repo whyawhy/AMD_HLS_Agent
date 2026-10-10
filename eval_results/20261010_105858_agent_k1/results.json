@@ -1,0 +1,51 @@
+{
+  "mode": "agent",
+  "k": 1,
+  "attempts": 2,
+  "do_synth": false,
+  "official_pass": false,
+  "model": "claude-fable-5",
+  "backend": "auto",
+  "part": "xczu3eg-sbva484-1-e",
+  "clock_ns": 5.0,
+  "tasks": [
+    "stencil_stencil3d",
+    "viterbi_viterbi"
+  ],
+  "records": [
+    {
+      "task": "stencil_stencil3d",
+      "variant": "machsuite",
+      "run_index": 1,
+      "passed": true,
+      "parse": true,
+      "compile": true,
+      "run": true,
+      "synth": null,
+      "dump_ok": true,
+      "dump_detail": "",
+      "attempts": 1,
+      "elapsed_s": 14.733439922332764,
+      "gen_time_s": 5.413923978805542,
+      "error": ""
+    },
+    {
+      "task": "viterbi_viterbi",
+      "variant": "machsuite",
+      "run_index": 1,
+      "passed": true,
+      "parse": true,
+      "compile": true,
+      "run": true,
+      "synth": null,
+      "dump_ok": true,
+      "dump_detail": "",
+      "attempts": 1,
+      "elapsed_s": 15.853166818618774,
+      "gen_time_s": 6.668689727783203,
+      "error": ""
+    }
+  ],
+  "started_at": "2026-10-10 10:58:28",
+  "total_elapsed_s": 30.586606740951538
+}
