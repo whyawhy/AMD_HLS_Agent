@@ -103,47 +103,69 @@ def build_prompt_gen_zero_shot(
 
 # --------------------------------------------------------------------------
 # 技能包领域知识（仅智能体模式附加；基线模式不带，保持官方口径可比）
-# 来源：skill/pitfalls.md 第 11、12 条——批量评测中 correlation/covariance
-# 因定点除法误差爆炸（8153%）与除零崩溃得到的教训。
+# 来源：skill/pitfalls.md 第 11、12、16、17 条——批量评测中总结出的教训。
+#
+# 分两部分：
+#   COMMON      所有题目都适用（复刻算法、边界值）
+#   FIXEDPOINT  只在题目确实用 ap_fixed 时注入
+#
+# 为什么必须分开：定点规则里「不要引入 float/double 中间量」「注意 ±32768 饱和」
+# 对 `double` 类型的内核是**有害的**——实测无条件注入时 polybench(double) 变体
+# 反而比基线退步 2 题。技能包知识必须匹配题目的数据类型。
 # --------------------------------------------------------------------------
 
-AGENT_SKILL_SYSTEM = dedent(
+AGENT_SKILL_COMMON = dedent(
     """
-## Fixed-Point Numerics Rules (learned from real failures)
+## Implementation Rules (learned from real failures)
 
-The target type is `ap_fixed` and every operation rounds. When the kernel involves
-division or square roots, follow these rules:
-
-1. Minimize division count. Mathematically equivalent formulas can differ by
-   orders of magnitude in fixed-point error. Prefer restructuring to perform
-   division once — e.g. for statistical kernels (correlation, covariance),
-   normalize the data first (`data /= sqrt(n) * stddev`), then the result is a
-   plain dot product with no further division.
-2. Protect denominators: before dividing, guard with `if (denom > eps) ... else 0;`
-   where eps is a small constant like 0.1. A zero denominator causes a runtime
-   divide-by-zero crash in the testbench.
-3. Use `hls::sqrt()` from "hls_math.h" for square roots on fixed-point types,
-   never `std::sqrt`.
-4. Do NOT introduce `float` or `double` intermediates. Accumulate in a wider
-   fixed-point type (e.g. `ap_fixed<64,32>`) and cast back to `t_ap_fixed` only
-   when storing to the output arrays.
-5. Watch the representable range. `ap_fixed<32,16>` can only hold about ±32768.
-   Iterative kernels (LU, Jacobi, Gram-Schmidt, triangular solves) accumulate
-   quickly and will **saturate** at ±32768, producing obviously wrong output.
-   If a sum or product can exceed that range, accumulate in `ap_fixed<64,32>`
-   (or rescale) rather than letting it saturate.
-6. Reproduce the described algorithm **exactly**, do not substitute an equivalent
+1. Reproduce the described algorithm **exactly**, do not substitute an equivalent
    one. Some testbenches compare results bit-for-bit against a reference
    implementation, so a different-but-mathematically-correct method still fails.
    If the description mentions lookup tables, named constant tables, shift counts,
-   or specific iteration counts, implement them literally. Pay special attention
-   to boundary inputs (0, all-ones, negative zero, NaN) — these are usually
-   special-cased in the reference.
+   or specific iteration counts, implement them literally.
+2. Pay special attention to boundary inputs (0, all-ones, negative zero, NaN,
+   empty range) — the reference implementation usually special-cases them.
+3. Do not add I/O, dynamic memory, or recursion to the kernel.
 
 These rules apply to the kernel implementation only. Do not modify the header or
 the testbench.
 """
 ).strip()
+
+AGENT_SKILL_FIXEDPOINT = dedent(
+    """
+## Fixed-Point Numerics Rules (the kernel uses `ap_fixed`)
+
+Every operation rounds, and the type has a limited range. Additionally:
+
+4. Minimize division count. Mathematically equivalent formulas can differ by
+   orders of magnitude in fixed-point error. Prefer restructuring to perform
+   division once — e.g. for statistical kernels (correlation, covariance),
+   normalize the data first (`data /= sqrt(n) * stddev`), then the result is a
+   plain dot product with no further division.
+5. Protect denominators: before dividing, guard with `if (denom > eps) ... else 0;`
+   where eps is a small constant like 0.1. A zero denominator crashes the testbench.
+6. Do NOT introduce `float` or `double` intermediates for the kernel's own
+   arithmetic. Accumulate in a wider fixed-point type (e.g. `ap_fixed<64,32>`)
+   and cast back to the output type only when storing.
+7. Watch the representable range. `ap_fixed<32,16>` holds only about ±32768.
+   Iterative kernels (LU, Jacobi, Gram-Schmidt, triangular solves) accumulate
+   quickly and will **saturate** at ±32768, producing obviously wrong output.
+   Accumulate in `ap_fixed<64,32>` (or rescale) rather than letting it saturate.
+8. Use `hls::sqrt()` from "hls_math.h" for square roots, never `std::sqrt`.
+"""
+).strip()
+
+
+def build_agent_skill_system(uses_fixed_point: bool) -> str:
+    """按题目实际使用的数值类型组合技能包提示词。"""
+    if uses_fixed_point:
+        return AGENT_SKILL_COMMON + "\n\n" + AGENT_SKILL_FIXEDPOINT
+    return AGENT_SKILL_COMMON
+
+
+# 兼容旧引用
+AGENT_SKILL_SYSTEM = AGENT_SKILL_COMMON + "\n\n" + AGENT_SKILL_FIXEDPOINT
 
 
 # --------------------------------------------------------------------------

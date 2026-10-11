@@ -305,6 +305,11 @@ def run_task(
     prev_code = ""
     use_skill = mode != "baseline"
 
+    # 技能包知识按题目实际用的数值类型组合：定点规则只在该题确实用 ap_fixed 时注入。
+    # 无条件注入会让 double 类型的内核被引导去规避 double，实测反而退步。
+    uses_fixed_point = "ap_fixed" in task.header_src
+    skill_system = prompts.build_agent_skill_system(uses_fixed_point) if use_skill else ""
+
     for i in range(1, max_attempts + 1):
         att = Attempt(index=i)
 
@@ -313,9 +318,6 @@ def run_task(
             # 第一次尝试用低温度求稳；重试时提高温度增加多样性，
             # 避免模型在同一个错误上打转
             retry_temp = None if i == 1 else 0.7
-            # 智能体模式附加技能包领域知识（定点数值规则）；基线模式不带，
-            # 保持与官方 zero-shot 口径可比——差值就是「增益」的一部分
-            skill_system = prompts.AGENT_SKILL_SYSTEM if use_skill else ""
             raw = client.complete(
                 system=skill_system,
                 messages=[{"role": "user", "content": prompt}],
