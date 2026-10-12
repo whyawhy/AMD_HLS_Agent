@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .backends import (
     AnthropicBackend,
@@ -68,6 +68,11 @@ class LLMClient:
     def describe(self) -> str:
         return self.backend.describe()
 
+    @property
+    def last_stats(self) -> Dict[str, Any]:
+        """上一次调用的耗时指标（Ollama 会填 token 数与各阶段耗时）。"""
+        return getattr(self.backend, "last_stats", {})
+
 
 def _make_backend(cfg: LLMConfig) -> LLMBackend:
     """按 cfg.backend 构造后端；auto 时按可用性依次尝试。"""
@@ -86,7 +91,7 @@ def _make_backend(cfg: LLMConfig) -> LLMBackend:
 
     # auto：本地优先（赛道要求本地开源权重），再退回远程兼容端点
     candidates: List[LLMBackend] = [
-        OllamaBackend(host=cfg.ollama_host, **common),
+        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx, **common),
         OpenAIBackend(base_url=cfg.openai_base_url, api_key="not-needed", **common),
         AnthropicBackend(base_url=cfg.base_url, api_key=cfg.api_key, **common),
     ]
@@ -116,7 +121,7 @@ def probe_backends(cfg: LLMConfig) -> List[tuple[str, bool, str]]:
                   thinking=cfg.thinking)
     out = []
     for b in (
-        OllamaBackend(host=cfg.ollama_host, **common),
+        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx, **common),
         OpenAIBackend(base_url=cfg.openai_base_url, api_key="not-needed", **common),
         AnthropicBackend(base_url=cfg.base_url, api_key=cfg.api_key, **common),
     ):

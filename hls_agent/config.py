@@ -324,6 +324,10 @@ class LLMConfig:
 
     # 各后端的地址与凭证
     ollama_host: str = DEFAULT_OLLAMA_HOST
+    # Ollama 的上下文窗口。**必须显式设置**：默认值只有 2048/4096，
+    # 而完整提示词（题面+测试台+头文件+技能包）实测可到 5000+ tokens，
+    # 不设会被静默截断——模型看不到完整测试台，生成的代码自然离谱。
+    ollama_num_ctx: int = 16384
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
     base_url: str = DEFAULT_LLM_BASE_URL  # anthropic 兼容端点
     api_key: str = ""
@@ -403,6 +407,7 @@ class LLMConfig:
             timeout_s=_int_env("HLS_AGENT_LLM_TIMEOUT", 300),
             thinking=os.environ.get("HLS_AGENT_THINKING", "off"),
             ollama_host=os.environ.get("HLS_AGENT_OLLAMA_HOST", DEFAULT_OLLAMA_HOST).rstrip("/"),
+            ollama_num_ctx=_int_env("HLS_AGENT_OLLAMA_NUM_CTX", 16384),
             openai_base_url=os.environ.get(
                 "HLS_AGENT_OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL
             ).rstrip("/"),

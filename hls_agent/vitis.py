@@ -100,6 +100,9 @@ class TaskPaths:
     build_name: str
     source_name: str  # 生成的内核 .cpp
     other_sources: List[str] = field(default_factory=list)  # 数据集带来的头文件/tb
+    # 其中哪些是测试台。综合时要按 `add_files -tb` 加入，不能混进设计源文件
+    # （混合加入会让综合器把 testbench 也纳入分析，官方工具是分开加的）
+    tb_sources: List[str] = field(default_factory=list)
     # testbench 用相对路径读的数据文件（如 MachSuite 的 input.data / check.data）。
     # csim.exe 是以 csim build 目录为工作目录运行的，这些文件必须先搬进去，
     # 否则 open("input.data") 会失败（表现为 assert "Couldn't open input data file"）。
@@ -238,8 +241,10 @@ def build_synth_tcl(
 ) -> str:
     """官方 VitisHLSSynthTool 的 tcl。"""
     lines = [f"open_project {paths.project_name}"]
+    tb_set = set(paths.tb_sources)
     for name in [paths.source_name] + paths.other_sources:
-        lines.append(f"add_files {name}")
+        # 测试台必须按 -tb 加入，其余按设计源文件加入（与官方工具一致）
+        lines.append(f"add_files -tb {name}" if name in tb_set else f"add_files {name}")
     lines.append(f"open_solution solution__synth -flow_target {flow_target}")
     lines.append(f"set_top {paths.build_name}")
     lines.append(f"set_part {part}")
@@ -435,13 +440,24 @@ def run_synth(
 
 
 def get_synth_log(paths: TaskPaths) -> str:
-    log_fp = paths.workdir / paths.project_name / "solution__synth" / "solution1.log"
-    if not log_fp.is_file():
-        log_fp = paths.workdir / paths.project_name / "solution__synth" / "csynth.log"
-    try:
-        return log_fp.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    """读综合阶段的 Vitis 日志（solution 名是 solution__synth，不是默认的 solution1）。"""
+    sol = paths.workdir / paths.project_name / "solution__synth"
+    if not sol.is_dir():
         return ""
+    # 同名 .log 优先，其次取该目录下最新的 .log
+    preferred = sol / "solution__synth.log"
+    if preferred.is_file():
+        try:
+            return preferred.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    logs = sorted(sol.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if logs:
+        try:
+            return logs[0].read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+    return ""
 
 
 def find_synth_report(paths: TaskPaths) -> Optional[Path]:

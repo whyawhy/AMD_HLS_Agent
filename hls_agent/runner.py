@@ -30,6 +30,7 @@ from .vitis import (
     clean_build,
     error_excerpt,
     find_synth_report,
+    get_synth_log,
     run_csim,
     run_synth,
 )
@@ -277,6 +278,7 @@ def run_task(
         build_name=task.top,
         source_name=task.source_name,
         other_sources=[task.header_name, task.tb_name],
+        tb_sources=[task.tb_name],
         # testbench 用相对路径读的数据文件（MachSuite 的 input.data/check.data），
         # 运行时必须先搬进 csim build 目录
         stage_files=[f.name for f in task.tb_data],
@@ -359,6 +361,22 @@ def run_task(
                 thinking=retry_thinking,
             )
             (workdir / f"raw_llm_output_{i}.txt").write_text(raw, encoding="utf-8", newline="\n")
+
+            # 打印本次生成的耗时构成——定位"慢在读提示词还是写代码"
+            st = active.last_stats
+            if verbose and st:
+                bits = []
+                if st.get("load_s", 0) > 2:
+                    bits.append(f"模型加载 {st['load_s']:.0f}s")
+                if st.get("prompt_tokens"):
+                    bits.append(f"提示词 {st['prompt_tokens']} tok/{st.get('prefill_s', 0):.1f}s")
+                if st.get("output_tokens"):
+                    bits.append(f"输出 {st['output_tokens']} tok/{st.get('decode_s', 0):.1f}s")
+                if st.get("tok_per_s"):
+                    bits.append(f"{st['tok_per_s']:.1f} tok/s")
+                if bits:
+                    print(f"           生成明细: {'; '.join(bits)}", flush=True)
+
             att.code = extract_source(raw, task.source_name, task.top)
         except Exception as e:
             att.generation_error = str(e)
@@ -483,10 +501,12 @@ def run_task(
                 paths, cfg.vitis_run, cfg.part, cfg.clock_ns, cfg.csynth_timeout_s
             )
             res.synth = synth_res
-            res.synth_log = synth_res.stdout + synth_res.stderr
+            res.synth_log = synth_res.stdout + synth_res.stderr + get_synth_log(paths)
             res.synth_report = find_synth_report(paths)
             res.grade.synth = synth_res.ok
             passed = synth_res.ok  # 综合失败同样要重试
+            if not synth_res.ok and verbose:
+                print(f"  [{i}] 综合失败（耗时 {synth_res.elapsed_s:.0f}s），准备重试", flush=True)
 
         report.attempts.append(att)
 
@@ -494,6 +514,15 @@ def run_task(
             break
         if not use_skill:
             break
+
+        # 明确说出为什么重试——否则总墙钟翻倍时看不出原因
+        if verbose:
+            why = (
+                "数值不符" if not att.dump_ok
+                else "仿真未通过" if not res.grade.run
+                else "综合未通过"
+            )
+            print(f"  [{i}/{max_attempts}] 未通过（{why}），重试中……", flush=True)
 
         errs = error_excerpt(res)
         if not att.dump_ok:

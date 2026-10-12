@@ -207,6 +207,63 @@ def test_vitis_cmd_dispatch() -> None:
     assert w[0] == "cmd" and w[1] == "/c", f".bat 未经 cmd 调用: {w}"
 
 
+def test_synth_tcl_separates_testbench() -> None:
+    """综合脚本必须把测试台按 -tb 加入，不能混进设计源文件。"""
+    from hls_agent.vitis import TaskPaths, build_synth_tcl
+
+    p = TaskPaths(
+        workdir=Path("/w"), build_name="kernel_x", source_name="x.cpp",
+        other_sources=["x.h", "x_tb.cpp"], tb_sources=["x_tb.cpp"],
+    )
+    tcl = build_synth_tcl(p, "part", 5.0)
+    assert "add_files x.cpp" in tcl, tcl
+    assert "add_files x.h" in tcl, tcl
+    assert "add_files -tb x_tb.cpp" in tcl, f"测试台未按 -tb 加入:\n{tcl}"
+    assert "\nadd_files x_tb.cpp" not in tcl, f"测试台被当设计文件加入:\n{tcl}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Ollama 上下文窗口与耗时诊断
+# ---------------------------------------------------------------------------
+
+def test_ollama_sends_num_ctx() -> None:
+    """必须显式传 num_ctx，否则 Ollama 用默认值截断长提示词。"""
+    from hls_agent.backends import OllamaBackend
+
+    b = OllamaBackend(model="m", num_ctx=8192, max_tokens=64, timeout_s=5)
+    captured: dict = {}
+
+    def fake_post(url, payload, headers, retries=3):
+        captured.update(payload)
+        return {"message": {"content": "x"}}
+
+    b._post = fake_post  # type: ignore[method-assign]
+    b.complete("", [{"role": "user", "content": "hi"}])
+    assert captured.get("options", {}).get("num_ctx") == 8192, captured.get("options")
+
+
+def test_ollama_captures_timing_stats() -> None:
+    """耗时指标要能落到 last_stats 上，否则无法定位"慢在哪"。"""
+    from hls_agent.backends import OllamaBackend
+
+    b = OllamaBackend(model="m", num_ctx=8192, max_tokens=64, timeout_s=5)
+    fake = {
+        "message": {"content": "code"},
+        "prompt_eval_count": 400,
+        "prompt_eval_duration": int(1e9),
+        "eval_count": 50,
+        "eval_duration": int(2e9),
+        "total_duration": int(3e9),
+        "load_duration": 0,
+    }
+    b._post = lambda *a, **k: fake  # type: ignore[method-assign]
+    out = b.complete("", [{"role": "user", "content": "hi"}])
+    assert out == "code"
+    assert b.last_stats["prompt_tokens"] == 400
+    assert abs(b.last_stats["decode_s"] - 2.0) < 0.01
+    assert abs(b.last_stats["tok_per_s"] - 25.0) < 0.1
+
+
 # ---------------------------------------------------------------------------
 
 def main() -> int:
@@ -243,6 +300,11 @@ def main() -> int:
 
     print("\n[5] Vitis 命令行构造")
     check("两种入口参数正确", test_vitis_cmd_dispatch)
+    check("综合脚本分离测试台", test_synth_tcl_separates_testbench)
+
+    print("\n[6] Ollama 上下文与耗时诊断")
+    check("显式传 num_ctx", test_ollama_sends_num_ctx)
+    check("采集耗时指标", test_ollama_captures_timing_stats)
 
     print()
     print("=" * 66)

@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -93,6 +94,8 @@ class LLMBackend(ABC):
         self.thinking = thinking
         # auto 模式下的补充说明（如「自动改用了某个可用模型」），供上层展示
         self.note = ""
+        # 上一次调用的耗时指标（token 数、各阶段耗时），供上层诊断"慢在哪"
+        self.last_stats: Dict[str, Any] = {}
 
     def _thinking_payload(self, override: Optional[str] = None) -> dict:
         """Anthropic 风格端点的 thinking 参数；override 优先于实例配置。"""
@@ -235,9 +238,13 @@ class OllamaBackend(LLMBackend):
 
     name = "ollama"
 
-    def __init__(self, host: str = "http://127.0.0.1:11434", **kw):
+    def __init__(self, host: str = "http://127.0.0.1:11434",
+                 num_ctx: int = 16384, **kw):
         super().__init__(**kw)
         self.host = host.rstrip("/")
+        # 必须显式设置：Ollama 默认上下文只有 2048/4096，而完整提示词
+        # 实测可到 5000+ tokens，不设会被静默截断（模型看不到完整测试台）
+        self.num_ctx = num_ctx
 
     def endpoint(self) -> str:
         return f"{self.host}/api/chat"
@@ -291,6 +298,9 @@ class OllamaBackend(LLMBackend):
             "options": {
                 "num_predict": max_tokens or self.max_tokens,
                 "temperature": self.temperature if temperature is None else temperature,
+                # 显式指定上下文窗口，否则 Ollama 用默认值（2048/4096）
+                # 把长提示词截断，模型会看不到完整测试台
+                "num_ctx": self.num_ctx,
             },
         }
 
@@ -302,6 +312,18 @@ class OllamaBackend(LLMBackend):
             payload["think"] = False
 
         headers = {"content-type": "application/json"}
+
+        # Ollama 在提示词超出 num_ctx 时会静默截断——模型看不到完整测试台，
+        # 生成的代码会离谱且难排查。这里粗估 token 数并明确预警。
+        approx_tokens = sum(len(m.get("content", "")) for m in msgs) // 3
+        if approx_tokens > self.num_ctx * 0.9:
+            print(
+                f"  [警告] 提示词约 {approx_tokens} tokens，接近或超过 Ollama "
+                f"上下文窗口 {self.num_ctx}，可能被截断。"
+                f"请调大环境变量 HLS_AGENT_OLLAMA_NUM_CTX。",
+                file=sys.stderr,
+            )
+
         try:
             data = self._post(self.endpoint(), payload, headers)
         except BackendError:
@@ -312,8 +334,26 @@ class OllamaBackend(LLMBackend):
 
         msg = data.get("message", {}) or {}
         content = msg.get("content", "")
+        # 思考型模型（qwen3 等）可能把内容放进 thinking 字段
+        if not content and msg.get("thinking"):
+            content = msg["thinking"]
         if not content:
             raise BackendError(f"Ollama 返回了空内容: {json.dumps(data)[:300]}")
+
+        # 记录耗时指标——定位"生成慢"到底慢在读提示词还是写代码
+        ns = 1e9
+        stats: Dict[str, Any] = {
+            "prompt_tokens": data.get("prompt_eval_count"),
+            "output_tokens": data.get("eval_count"),
+            "prefill_s": (data.get("prompt_eval_duration") or 0) / ns,
+            "decode_s": (data.get("eval_duration") or 0) / ns,
+            "load_s": (data.get("load_duration") or 0) / ns,
+            "total_s": (data.get("total_duration") or 0) / ns,
+        }
+        oc = stats["output_tokens"] or 0
+        if stats["decode_s"] > 0 and oc:
+            stats["tok_per_s"] = oc / stats["decode_s"]
+        self.last_stats = stats
         return content
 
 
