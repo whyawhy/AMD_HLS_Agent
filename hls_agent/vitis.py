@@ -329,9 +329,24 @@ def csim_env(build_dir: Path, vitis_run: Path) -> dict:
 
 
 def _vitis_cmd(vitis_run: Path, tcl_name: str) -> List[str]:
-    if str(vitis_run).lower().endswith(".bat"):
-        return ["cmd", "/c", str(vitis_run), "--mode", "hls", "--tcl", tcl_name]
-    return [str(vitis_run), "--mode", "hls", "--tcl", tcl_name]
+    """按入口名构造正确的命令行。
+
+    两种入口的调用方式不同，混用会直接报参数错误：
+      vitis-run   (2024 起的新入口) -> vitis-run --mode hls --tcl xxx.tcl
+      vitis_hls   (旧入口，Linux 上仍常见) -> vitis_hls -f xxx.tcl
+    """
+    name = vitis_run.name.lower()
+    cmd = [str(vitis_run)]
+
+    if name.startswith("vitis_hls"):
+        cmd += ["-f", tcl_name]
+    else:
+        cmd += ["--mode", "hls", "--tcl", tcl_name]
+
+    # .bat 必须经 cmd.exe 调用
+    if name.endswith(".bat"):
+        return ["cmd", "/c"] + cmd
+    return cmd
 
 
 def clean_build(paths: TaskPaths) -> None:
