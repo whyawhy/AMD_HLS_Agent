@@ -33,11 +33,15 @@ WARNINGS = [
     (re.compile(r"\bdouble\b"), "出现 double，确认是否应为定点类型"),
     (re.compile(r"\bwhile\s*\(\s*1\s*\)"), "出现 while(1)，HLS 中可能无法收敛"),
     (re.compile(r"#pragma\s+HLS\s+inline", re.IGNORECASE), "顶层函数上的 #pragma HLS inline 通常无意义"),
-    # hls::sqrt / hls::log 等数学函数会链 libhlsmc，Windows 的 Vitis 安装缺
-    # 对应 DLL（libhlsmc++-GCC95-x64.dll 实测不存在），csim.exe 运行会崩
-    (re.compile(r"hls::(sqrt|log|exp|sin|cos|pow|rsqrt|fabs)\s*\("),
-     "使用了 hls 数学函数——Linux 评测环境正常，但 Windows 本机 csim 会因缺少 "
-     "libhlsmc DLL 崩溃（见 skill/pitfalls.md 第 15 条）"),
+    # hls::sqrt 会链 libhlsmc；std::sqrt 会链 libhlsm。两者的运行时 DLL 在
+    # Vitis Windows 安装里都缺失（实测全盘搜索无果），csim.exe 会以
+    # 0xC0000135 崩溃。hls::sqrt 对 ap_fixed 是内联展开所以没事，
+    # std::sqrt 对 double 会真的去链外部库。
+    (re.compile(r"\bstd::(sqrt|log|exp|sin|cos|pow|rsqrt|fabs|cbrt|atan2?)\s*\("),
+     "使用了 std:: 数学函数，Vitis 会链接缺失的数学库 DLL（Windows 上 csim 崩溃）；"
+     "建议手写内联实现（如牛顿迭代开方），见 skill/pitfalls.md 第 20 条"),
+    (re.compile(r"(?<![\w:.])\b(sqrt|pow|cbrt)\s*\("),
+     "使用了裸 sqrt/pow，Vitis 会链接缺失的数学库 DLL；建议手写内联实现"),
 ]
 
 _FUNC_DEF = re.compile(

@@ -375,34 +375,59 @@ dump 型（只把结果打印到 `==BEGIN DUMP_ARRAYS==` 块，由外部脚本�
 
 ---
 
-## 15. Windows 本机的 Vitis 缺 libhlsmc DLL（hls::sqrt 触发）
+## 15. Windows 本机的 Vitis 缺数学库 DLL（**`std::sqrt` 触发，不是 `hls::sqrt`**）
+
+> **本条曾被误判并修正过。** 最初观察到 correlation（定点）用 `hls::sqrt` 崩溃，
+> 就把 `hls::sqrt` 判成元凶，还据此写了一条「double 内核请用 std::sqrt」的提示词
+> 规则——**方向完全相反**，导致 4 道 double 题从「能跑」变成「崩溃」。
+> 下面是修正后的结论，教训见末尾。
 
 **现象**
 
-代码用 `hls::sqrt` / `hls::log` 等数学函数后，csim 编译照常通过，但运行
-`csim.exe` 时**立即崩溃**：返回码 3221225781（0xC0000135 = STATUS_DLL_NOT_FOUND），
-stdout/stderr 全空，和「缺 DLL 静默退出」（第 2 条）是同一类症状。
+csim 编译照常通过，但运行 `csim.exe` 时**立即崩溃**：返回码 3221225781
+（0xC0000135 = STATUS_DLL_NOT_FOUND），stdout/stderr 全空，
+和「缺 DLL 静默退出」（第 2 条）是同一类症状。
 
-**根因**
+**根因（经 pefile 解析导入表 + 对照实验确定）**
 
-用 pefile 解析 csim.exe 的导入表：不含 hls 数学函数的 exe 只依赖
-`KERNEL32/libstdc++-6/msvcrt`，含 `hls::sqrt` 的 exe 额外依赖
-`libhlsmc++-GCC95-x64.dll`。全盘搜索 Vitis 2026.1 安装目录，只能找到
-**综合用的位码文件** `win64/lib/libhlsmc++_39.bc`（LLVM IR），
-**找不到任何运行时 DLL**——链接用的 import lib 在、运行时 DLL 缺失，
-是 Vitis Windows 安装的硬伤。
+| 代码里的写法 | csim.exe 的额外依赖 | 结果 |
+| --- | --- | --- |
+| `hls::sqrt`（ap_fixed） | 无（模板内联展开） | ✅ 能跑 |
+| **手写内联 sqrt** | 无 | ✅ 能跑，且**数值与参考完全一致（误差 0）** |
+| **`std::sqrt` / 裸 `sqrt()`** | `libhlsm-GCC95-x64.dll` | ❌ 缺 DLL 崩溃 |
+
+Vitis 的 csim 把 `std::` 数学函数链接到它自己的数学库，而运行时 DLL
+（`libhlsm` / `libhlsmc`）**在整个 Vitis Windows 安装里都不存在**
+（全盘搜索只能找到综合用的位码 `libhlsmc++_39.bc`）。
 
 **规避**
 
-1. 这是 **Windows 开发机特有**问题；官方评测在 Linux 容器里，DLL 不存在此坑，
-   不要因为 Windows 上跑不了就否定代码。
-2. 静态预检对 `hls::` 数学函数给出警告；runner 检测到
-   「0xC0000135 + 零输出」判定为环境受限，**停止重试**（重试无用，编译每次
-   都成功），并在结果里注明。
-3. 这类题（correlation / covariance 等含 sqrt 的统计 kernel）在 Windows 上
-   只验证到「可编译」，数值正确性留给 Linux 评测机验证。
-4. 若必须在本机验证数值：改写代码避免 hls::sqrt（用定点迭代法手写 sqrt），
-   或在 Linux 容器（WSL2 + 官方镜像）里跑。
+1. **内核里避免 `std::` 数学函数和裸 `sqrt()/pow()`**，手写内联实现。
+   开方用牛顿迭代即可，实测与参考实现**逐位一致**：
+   ```cpp
+   static double my_sqrt(double x) {
+       if (x <= 0.0) return 0.0;
+       double r = x;
+       for (int i = 0; i < 60; i++) r = 0.5 * (r + x / r);
+       return r;
+   }
+   ```
+   `ap_fixed` 内核用 `hls::sqrt`（内联，安全）。
+2. 静态预检对 `std::` 数学函数与裸 `sqrt/pow` 给出警告。
+3. 这是 **Windows 开发机特有**；Linux 评测环境无此坑。runner 检测到
+   「0xC0000135 + 零输出」会判定为环境受限并停止无效重试。
+4. **注意 testbench 侧的依赖**：有些题的数学调用在**测试台**里（如
+   `pp4fpga_cordic` 的 testbench 用 VivadoHLS 风格的 `sin/cos`），而测试台由
+   数据集提供、**不可修改**。这类题在 Windows 上无论内核怎么写都跑不了，
+   属于硬限制，只能留到 Linux 评测机验证——不要在它上面浪费重试额度。
+
+**教训（比坑本身更重要）**
+
+1. **归因不能只看一次观察**。当时只看到「用了 hls::sqrt 的题崩了」就下结论，
+   没做对照实验（「同样逻辑换一种写法还会不会崩」）。做了才发现方向反了。
+2. **错误的知识进了提示词会主动造成伤害**。这条误判被写进技能包后，直接
+   让 4 道题退步——技能包里的每条规则都应该有实验支撑，而不是推测。
+3. 修正方式：静态预检里同时检查两种写法，提示词给出**实测过的**正确做法。
 
 
 ---
