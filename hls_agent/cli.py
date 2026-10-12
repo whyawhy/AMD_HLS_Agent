@@ -233,8 +233,13 @@ def cmd_run_tasks(args: argparse.Namespace) -> int:
         return _dry_run(tasks, cfg, args)
 
     if not cfg.vitis_ready():
-        print("[错误] 没找到 Vitis。用 --vitis <vitis-run.bat 路径> 指定。", file=sys.stderr)
-        print(f"       已查找: {cfg.vitis_run}", file=sys.stderr)
+        print("[错误] 没找到 Vitis HLS。", file=sys.stderr)
+        print("       指定方式（任选一种）：", file=sys.stderr)
+        print('         1) 加到环境变量：  $env:HLS_AGENT_VITIS_RUN="<路径>\\bin\\vitis-run.bat"', file=sys.stderr)
+        print('         2) 命令行参数：    python hls_agent.py --task 2mm --vitis "<路径>\\bin\\vitis-run.bat"', file=sys.stderr)
+        print("       路径形如 <安装根>\\Vitis\\bin\\vitis-run.bat（2024 版起）或 vitis_hls.bat（更早）。", file=sys.stderr)
+        print("       不确定装在哪就先搜：", file=sys.stderr)
+        print("         Get-ChildItem C:\\,D:\\,E:\\ -Recurse -Depth 5 -Include vitis-run.bat,vitis_hls.bat -ErrorAction SilentlyContinue", file=sys.stderr)
         return 2
 
     reports: List[TaskReport] = []

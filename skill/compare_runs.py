@@ -50,25 +50,46 @@ def _by_variant(by_task: Dict[str, dict]) -> Dict[str, Tuple[int, int]]:
     return {k: (v[0], v[1]) for k, v in out.items()}
 
 
-def _auto_find(base: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    rounds = sorted(base.glob("20*_*_k*"))
-    agent = next((d for d in reversed(rounds) if "_agent_" in d.name and _is_full(d)), None)
-    baseline = next((d for d in reversed(rounds) if "_baseline_" in d.name), None)
-    return agent, baseline
-
-
-def _is_full(d: Path) -> bool:
-    """只挑全量（题数最多）的那一轮，避免拿小批次的对比。"""
+def _task_set(d: Path) -> frozenset:
+    """取一轮评测跑过的题目集合。"""
     try:
         data = json.loads((d / "results.json").read_text(encoding="utf-8"))
-        return len(data.get("tasks", [])) >= 100
+        return frozenset(data.get("tasks", []))
     except Exception:
-        return False
+        return frozenset()
+
+
+def _auto_find(base: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """找出最近的一对「题集完全相同」的 agent / baseline。
+
+    只按时间取最近的两个是错的——如果一次是 122 题的全量、另一次是 1 题的
+    试跑，比出来的数字毫无意义（题集不同，通过率不可比）。
+    """
+    rounds = sorted(base.glob("20*_*_k*"))
+    agents = [d for d in reversed(rounds) if "_agent_" in d.name]
+    baselines = [d for d in reversed(rounds) if "_baseline_" in d.name]
+
+    for b in baselines:
+        bt = _task_set(b)
+        if not bt:
+            continue
+        for a in agents:
+            if _task_set(a) == bt:
+                return a, b
+    return None, None
 
 
 def compare(agent_dir: Path, base_dir: Path) -> str:
     a_data, a_tasks = _load(agent_dir)
     b_data, b_tasks = _load(base_dir)
+
+    # 只比两次都跑过的题——题集不同时通过率不可直接比较
+    a_set, b_set = set(a_tasks), set(b_tasks)
+    common = a_set & b_set
+    only_a, only_b = sorted(a_set - b_set), sorted(b_set - a_set)
+    if common:
+        a_tasks = {k: v for k, v in a_tasks.items() if k in common}
+        b_tasks = {k: v for k, v in b_tasks.items() if k in common}
 
     a_ok, a_n = _rate(a_tasks)
     b_ok, b_n = _rate(b_tasks)
@@ -80,6 +101,16 @@ def compare(agent_dir: Path, base_dir: Path) -> str:
              f"重试上限 {a_data.get('attempts')}，技能包+工具反馈）")
     L.append(f"- 基线　：`{base_dir.name}`（同一模型，单次生成、不重试、不带技能包）")
     L.append(f"- 判定口径：{'官方（只认 csim 返回码）' if a_data.get('official_pass') else '严格（数值一致才算通过）'}")
+    if only_a or only_b:
+        L.append("")
+        L.append(f"> ⚠️ 两次运行的题集不完全相同，**下面只比较共同跑过的 {len(common)} 道题**。")
+        if only_a:
+            L.append(f"> 仅智能体跑过：{len(only_a)} 道（{', '.join(only_a[:5])}"
+                     f"{' …' if len(only_a) > 5 else ''}）")
+        if only_b:
+            L.append(f"> 仅基线跑过：{len(only_b)} 道（{', '.join(only_b[:5])}"
+                     f"{' …' if len(only_b) > 5 else ''}）")
+        L.append("> 要做正式对比，请用**同一批题**跑两种模式。")
     L.append("")
 
     L.append("## 总览")

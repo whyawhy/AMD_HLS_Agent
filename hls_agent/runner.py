@@ -296,6 +296,19 @@ def run_task(
         if note:
             print(f"  [模型] {note}", flush=True)
 
+    # 重试可换用更大的模型：首次用小模型求快，失败后换大模型求准。
+    # 多数题第一次就过，所以快速路径占主导；难题才付大模型的代价。
+    retry_client = None
+    if cfg.llm.retry_model and cfg.llm.retry_model != client.backend.model:
+        rc = LLMConfig.from_env()
+        rc.model = cfg.llm.retry_model
+        try:
+            retry_client = LLMClient(rc)
+            if verbose:
+                print(f"  [模型] 重试将换用 {retry_client.backend.model}", flush=True)
+        except Exception:
+            retry_client = None
+
     base_prompt = prompts.build_prompt_gen_zero_shot(
         description_name=task.description_file.name,
         description=task.description,
@@ -327,7 +340,19 @@ def run_task(
             # 复杂算法）靠无思考模式修不好，推理能力能显著提升修复成功率。
             # 代价是重试每次慢约 1~2 分钟，只影响失败题，正确率优先。
             retry_thinking = None if i == 1 else "budget:2048"
-            raw = client.complete(
+
+            # 模型调用期间没有任何输出，本地大模型可能要等几分钟，
+            # 不提示会被误认为卡死
+            if verbose:
+                print(
+                    f"  [{i}/{max_attempts}] 调用模型生成中……"
+                    f"（本地大模型首次要约 1~3 分钟，请勿 Ctrl+C）",
+                    flush=True,
+                )
+
+            # 重试时换用更大的模型（若配置了 HLS_AGENT_RETRY_MODEL）
+            active = retry_client if (i > 1 and retry_client is not None) else client
+            raw = active.complete(
                 system=skill_system,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=retry_temp,
@@ -399,19 +424,10 @@ def run_task(
         res.grade.compile = bool(res.compile and res.compile.ok)
         res.grade.run = bool(res.run and res.run.ok)
 
-        # ---- 综合 ----
-        if do_synth and res.grade.compile:
-            if verbose:
-                print(f"  [尝试 {i}] 综合中（较慢）...", flush=True)
-            synth_res = run_synth(
-                paths, cfg.vitis_run, cfg.part, cfg.clock_ns, cfg.csynth_timeout_s
-            )
-            res.synth = synth_res
-            res.synth_log = synth_res.stdout + synth_res.stderr
-            res.synth_report = find_synth_report(paths)
-            res.grade.synth = synth_res.ok
-
         att.result = res
+        # 注意：综合（csynth）不在这里跑——它很慢（本地约 200s），
+        # 若本次尝试注定要重试（数值不符），跑了也是白跑。
+        # 挪到数值比对通过之后执行，见下方。
 
         # ---- 环境受限检测：Windows 缺 libhlsmc DLL（hls::sqrt 等数学函数触发）----
         # 0xC0000135 (STATUS_DLL_NOT_FOUND) 且无任何输出 = 运行前 DLL 加载失败，
@@ -454,10 +470,26 @@ def run_task(
         else:
             att.dump_ok, att.dump_detail = True, ""
 
-        report.attempts.append(att)
-
         # 通过条件：可运行 +（严格模式）数值一致
         passed = res.grade.run and (att.dump_ok or not cfg.strict_dump)
+
+        # ---- 综合：只在前三级都过了才跑 ----
+        # csynth 很慢（本地约 200s），而失败题必然要重试——先跑综合等于白付一次。
+        # 放在这里，失败题每次省下约 200s；只有「有可能通过」的那次才付这个代价。
+        if do_synth and passed:
+            if verbose:
+                print(f"  [尝试 {i}] 综合中（较慢，约 1~3 分钟）...", flush=True)
+            synth_res = run_synth(
+                paths, cfg.vitis_run, cfg.part, cfg.clock_ns, cfg.csynth_timeout_s
+            )
+            res.synth = synth_res
+            res.synth_log = synth_res.stdout + synth_res.stderr
+            res.synth_report = find_synth_report(paths)
+            res.grade.synth = synth_res.ok
+            passed = synth_res.ok  # 综合失败同样要重试
+
+        report.attempts.append(att)
+
         if passed:
             break
         if not use_skill:

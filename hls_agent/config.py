@@ -36,12 +36,22 @@ _VITIS_VERSIONS = ["2026.1", "2025.2", "2025.1", "2024.2", "2024.1", "2023.2"]
 
 # Windows：统一用 vitis-run.bat（2024 起没有 vitis_hls 命令了）
 _VITIS_HINTS_WIN = [
+    # 传统布局：<驱动器>:\Xilinx\Vitis\<版本>\bin
     r"C:\Xilinx\Vitis\{v}\bin",
     r"D:\Xilinx\Vitis\{v}\bin",
     r"E:\Xilinx\Vitis\{v}\bin",
     r"C:\AMDdesign\{v}\Vitis\bin",
     r"D:\AMDdesign\{v}\Vitis\bin",
     r"E:\AMDdesign\{v}\Vitis\bin",
+    # 版本号在前的布局：<驱动器>:\<版本>\Vitis\bin
+    r"C:\{v}\Vitis\bin",
+    r"D:\{v}\Vitis\bin",
+    r"E:\{v}\Vitis\bin",
+    r"F:\{v}\Vitis\bin",
+    # 直接装在盘根
+    r"C:\Vitis\bin",
+    r"D:\Vitis\bin",
+    r"E:\Vitis\bin",
 ]
 # Linux：新旧两种安装布局 + 两种入口名
 _VITIS_HINTS_LINUX = [
@@ -51,6 +61,8 @@ _VITIS_HINTS_LINUX = [
     "/opt/Xilinx/Vitis_HLS/{v}/bin",
     "/opt/amd/Vitis/{v}/bin",
     "/opt/amd/Vitis_HLS/{v}/bin",
+    "/tools/{v}/Vitis/bin",
+    "/opt/{v}/Vitis/bin",
 ]
 # 按平台排序：Windows 优先用 .bat（无扩展名的是 Linux 脚本，cmd 跑不了）
 if os.name == "nt":
@@ -298,6 +310,9 @@ class LLMConfig:
     # 后端选择：auto（本地优先）/ ollama / openai / anthropic
     backend: str = "auto"
     model: str = DEFAULT_LLM_MODEL
+    # 重试时可换用另一个模型：首次尝试用小模型求快，失败后用大模型求准。
+    # 留空表示重试沿用同一个模型。
+    retry_model: str = ""
     max_tokens: int = 16384
     temperature: float = 0.2
     timeout_s: int = 300
@@ -383,6 +398,7 @@ class LLMConfig:
         return cls(
             backend=backend,
             model=model,
+            retry_model=os.environ.get("HLS_AGENT_RETRY_MODEL", "").strip(),
             max_tokens=_int_env("HLS_AGENT_MAX_TOKENS", 16384),
             timeout_s=_int_env("HLS_AGENT_LLM_TIMEOUT", 300),
             thinking=os.environ.get("HLS_AGENT_THINKING", "off"),
