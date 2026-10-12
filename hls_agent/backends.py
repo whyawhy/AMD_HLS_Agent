@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
@@ -90,6 +91,8 @@ class LLMBackend(ABC):
         # 思考控制：off / budget:N。推理模型的思考 token 是生成时间的主要来源，
         # 实测关闭思考后输出 token 减半以上。
         self.thinking = thinking
+        # auto 模式下的补充说明（如「自动改用了某个可用模型」），供上层展示
+        self.note = ""
 
     def _thinking_payload(self, override: Optional[str] = None) -> dict:
         """Anthropic 风格端点的 thinking 参数；override 优先于实例配置。"""
@@ -117,7 +120,21 @@ class LLMBackend(ABC):
         """一次对话补全，返回正文文本。"""
 
     def describe(self) -> str:
-        return f"{self.name}: {self.model} @ {self.endpoint()}"
+        note = f"  ({self.note})" if getattr(self, "note", "") else ""
+        return f"{self.name}: {self.model} @ {self.endpoint()}{note}"
+
+    # ------------------------------------------------------------------
+    def resolve_model(self) -> Tuple[Optional[str], str]:
+        """auto 模式下挑一个**服务上真实存在**的模型。
+
+        返回 (模型名 或 None, 说明)。默认实现不做改动——只有本地后端会
+        覆写它，因为本地服务的可用模型是能枚举的。
+
+        为什么需要：配置里的模型名可能来自别的机器（如开发机的默认值），
+        到了新机器上服务在线但模型不在。此时与其报错让人手动改，不如自动
+        挑一个可用的并说明清楚。
+        """
+        return self.model, ""
 
     # 供子类复用：带重试的 POST
     def _post(self, url: str, payload: dict, headers: dict, retries: int = 3) -> dict:
@@ -166,16 +183,34 @@ class OpenAIBackend(LLMBackend):
     def endpoint(self) -> str:
         return f"{self.base_url}/v1/chat/completions"
 
-    def available(self) -> Tuple[bool, str]:
+    def list_models(self) -> List[str]:
+        """列出服务上已有的模型 id（连不上则返回空表）。"""
         try:
             r = requests.get(f"{self.base_url}/v1/models", timeout=5)
-            if r.status_code == 200:
-                return True, "服务在线"
-            return False, f"HTTP {r.status_code}"
-        except requests.RequestException as e:
-            return False, f"连不上: {e.__class__.__name__}"
+            if r.status_code != 200:
+                return []
+            return [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
+        except requests.RequestException:
+            return []
 
-    def complete(self, system, messages, max_tokens=None, temperature=None) -> str:
+    def available(self) -> Tuple[bool, str]:
+        names = self.list_models()
+        if not names:
+            return False, "连不上: 服务未启动或端口不对"
+        return True, f"服务在线，{len(names)} 个模型"
+
+    def resolve_model(self) -> Tuple[Optional[str], str]:
+        """配置的模型不在时自动挑一个（多数服务只挂一个模型，直接用它）。"""
+        names = self.list_models()
+        if not names or self.model in names:
+            return self.model, ""
+        best = names[0]
+        return best, f"配置的模型 {self.model} 不在服务上，自动改用 {best}"
+
+    def complete(self, system, messages, max_tokens=None, temperature=None,
+                 thinking: Optional[str] = None) -> str:
+        # OpenAI 兼容接口没有统一的思考控制参数，这里接受但忽略——
+        # 调用方（runner）会对所有后端传同一个签名，必须保持一致
         msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
         payload = {
             "model": self.model,
@@ -207,24 +242,47 @@ class OllamaBackend(LLMBackend):
     def endpoint(self) -> str:
         return f"{self.host}/api/chat"
 
-    def available(self) -> Tuple[bool, str]:
+    def list_models(self) -> List[str]:
+        """列出服务上已有的模型名（连不上或没有则返回空表）。"""
         try:
             r = requests.get(f"{self.host}/api/tags", timeout=5)
             if r.status_code != 200:
-                return False, f"HTTP {r.status_code}"
-            tags = r.json().get("models", [])
-            names = {m.get("name", "") for m in tags}
-            if not names:
-                return False, "服务在线但没有任何模型，先执行 ollama pull <模型>"
-            base = self.model.split(":")[0]
-            if not any(n == self.model or n.split(":")[0] == base for n in names):
-                return False, (f"服务在线，但没有模型 {self.model}。"
-                               f"已有: {', '.join(sorted(names)[:5])}")
-            return True, "服务在线，模型已就绪"
-        except requests.RequestException as e:
-            return False, f"连不上: {e.__class__.__name__}"
+                return []
+            return [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+        except requests.RequestException:
+            return []
 
-    def complete(self, system, messages, max_tokens=None, temperature=None) -> str:
+    def _has_model(self, names: List[str]) -> bool:
+        base = self.model.split(":")[0]
+        return any(n == self.model or n.split(":")[0] == base for n in names)
+
+    def available(self) -> Tuple[bool, str]:
+        names = self.list_models()
+        if not names:
+            return False, "连不上或服务上没有任何模型（先 ollama pull <模型>）"
+        if not self._has_model(names):
+            return False, (f"服务在线，但没有模型 {self.model}。"
+                           f"已有: {', '.join(sorted(names)[:6])}")
+        return True, "服务在线，模型已就绪"
+
+    def resolve_model(self) -> Tuple[Optional[str], str]:
+        """配置的模型不在时，自动挑一个可用的（优先代码模型，其次参数大的）。"""
+        names = self.list_models()
+        if not names or self._has_model(names):
+            return self.model, ""
+
+        def score(n: str) -> tuple:
+            low = n.lower()
+            coder = 0 if "coder" in low else 1
+            nums = re.findall(r"(\d+)\s*b", low)
+            size = -max((int(x) for x in nums), default=0)
+            return (coder, size)
+
+        best = sorted(names, key=score)[0]
+        return best, f"配置的模型 {self.model} 不在服务上，自动改用 {best}"
+
+    def complete(self, system, messages, max_tokens=None, temperature=None,
+                 thinking: Optional[str] = None) -> str:
         msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
         payload = {
             "model": self.model,
@@ -235,7 +293,23 @@ class OllamaBackend(LLMBackend):
                 "temperature": self.temperature if temperature is None else temperature,
             },
         }
-        data = self._post(self.endpoint(), payload, {"content-type": "application/json"})
+
+        # Ollama 用 `think` 控制推理模型的思考过程（qwen3 等）。非思考模型
+        # 或旧版本可能不认这个参数，所以失败时去掉重试一次。
+        t = (thinking if thinking is not None else self.thinking or "").strip().lower()
+        use_think = t in ("off", "disabled", "none", "0")
+        if use_think:
+            payload["think"] = False
+
+        headers = {"content-type": "application/json"}
+        try:
+            data = self._post(self.endpoint(), payload, headers)
+        except BackendError:
+            if not use_think:
+                raise
+            payload.pop("think", None)
+            data = self._post(self.endpoint(), payload, headers)
+
         msg = data.get("message", {}) or {}
         content = msg.get("content", "")
         if not content:

@@ -94,6 +94,13 @@ def _make_backend(cfg: LLMConfig) -> LLMBackend:
         ok, _why = b.available()
         if ok:
             return b
+        # 服务在线、只是配置里的模型名对不上（常见于换机器后沿用了别处的配置）：
+        # 自动挑一个服务上真实存在的模型，并把这件事记在 note 里让上层提示出来
+        model, note = b.resolve_model()
+        if model and note:
+            b.model = model
+            b.note = note
+            return b
 
     # 都不在线时，按"哪个配了凭证用哪个"兜底，让报错更有指向性
     for b in candidates:

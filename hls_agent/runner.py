@@ -290,6 +290,11 @@ def run_task(
         from .config import LLMConfig
 
         client = LLMClient(LLMConfig.from_env())
+        # auto 模式可能自动换用了别的模型（配置里的名字在当前服务上不存在），
+        # 这属于需要用户知道的变化，显式打出来
+        note = getattr(client.backend, "note", "")
+        if note:
+            print(f"  [模型] {note}", flush=True)
 
     base_prompt = prompts.build_prompt_gen_zero_shot(
         description_name=task.description_file.name,
