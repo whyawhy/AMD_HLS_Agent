@@ -224,7 +224,11 @@ class HlsEvalDataset:
 
 def default_dataset_roots() -> List[Path]:
     home = Path.home()
+    # 先看代码目录附近——发布包里数据集常和代码放在一起
+    here = Path(__file__).resolve().parent.parent
     return [
+        here / "hls_eval_data",
+        here.parent / "hls_eval_data",
         Path(r"E:\HLS-Eval\hls-eval-main\hls_eval_data"),
         Path(r"E:\HLS-Eval\hls-eval-main"),
         Path(r"E:\HLS-Eval"),
