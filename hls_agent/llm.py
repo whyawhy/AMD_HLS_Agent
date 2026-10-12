@@ -56,9 +56,12 @@ class LLMClient:
         messages: List[Dict[str, str]],
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        thinking: Optional[str] = None,
     ) -> str:
         try:
-            return self.backend.complete(system, messages, max_tokens, temperature)
+            return self.backend.complete(
+                system, messages, max_tokens, temperature, thinking=thinking
+            )
         except BackendError as e:
             raise LLMError(str(e)) from e
 

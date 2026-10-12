@@ -318,10 +318,15 @@ def run_task(
             # 第一次尝试用低温度求稳；重试时提高温度增加多样性，
             # 避免模型在同一个错误上打转
             retry_temp = None if i == 1 else 0.7
+            # 第 1 次尝试关闭思考求快；重试时给思考预算——难题（软浮点、
+            # 复杂算法）靠无思考模式修不好，推理能力能显著提升修复成功率。
+            # 代价是重试每次慢约 1~2 分钟，只影响失败题，正确率优先。
+            retry_thinking = None if i == 1 else "budget:2048"
             raw = client.complete(
                 system=skill_system,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=retry_temp,
+                thinking=retry_thinking,
             )
             (workdir / f"raw_llm_output_{i}.txt").write_text(raw, encoding="utf-8", newline="\n")
             att.code = extract_source(raw, task.source_name, task.top)

@@ -126,6 +126,13 @@ AGENT_SKILL_COMMON = dedent(
 2. Pay special attention to boundary inputs (0, all-ones, negative zero, NaN,
    empty range) — the reference implementation usually special-cases them.
 3. Do not add I/O, dynamic memory, or recursion to the kernel.
+4. Use the right math namespace for the data type. For `double`/`float` kernels,
+   call `std::sqrt`, `std::cos`, etc. and include <cmath>. Never call `hls::sqrt`
+   or a bare `sqrt()` — the HLS math library pulls in hardware-model DLLs and is
+   meant for `ap_fixed` kernels only.
+5. The testbench often contains concrete test cases with expected outputs.
+   Read them before writing the implementation and make sure every case passes,
+   especially the boundary ones.
 
 These rules apply to the kernel implementation only. Do not modify the header or
 the testbench.

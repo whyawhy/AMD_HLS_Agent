@@ -91,9 +91,9 @@ class LLMBackend(ABC):
         # 实测关闭思考后输出 token 减半以上。
         self.thinking = thinking
 
-    def _thinking_payload(self) -> dict:
-        """Anthropic 风格端点的 thinking 参数。"""
-        t = self.thinking.strip().lower()
+    def _thinking_payload(self, override: Optional[str] = None) -> dict:
+        """Anthropic 风格端点的 thinking 参数；override 优先于实例配置。"""
+        t = (override if override is not None else self.thinking).strip().lower()
         if t in ("off", "disabled", "none", "0"):
             return {"thinking": {"type": "disabled"}}
         if t.startswith("budget:"):
@@ -266,14 +266,15 @@ class AnthropicBackend(LLMBackend):
             return False, "缺少 API Key"
         return True, "已配置凭证"
 
-    def complete(self, system, messages, max_tokens=None, temperature=None) -> str:
+    def complete(self, system, messages, max_tokens=None, temperature=None,
+                 thinking: Optional[str] = None) -> str:
         payload = {
             "model": self.model,
             "max_tokens": max_tokens or self.max_tokens,
             "temperature": self.temperature if temperature is None else temperature,
             "messages": list(messages),
         }
-        payload.update(self._thinking_payload())
+        payload.update(self._thinking_payload(thinking))
         if system:
             payload["system"] = system
         headers = {
