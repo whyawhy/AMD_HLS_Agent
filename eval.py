@@ -30,6 +30,7 @@ import json
 import platform
 import statistics
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -218,67 +219,88 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
     )
 
     t_all = time.time()
-    total_runs = len(tasks) * args.k
     budget = args.max_total_time if args.max_total_time > 0 else None
+    jobs = max(1, getattr(args, "jobs", 1))
 
-    for ti, task in enumerate(tasks, 1):
-        for k in range(1, args.k + 1):
-            idx = (ti - 1) * args.k + k
-            # 总时间预算：超时后剩余题目记为跳过，不再消耗模型额度和 Vitis 时间
-            if budget is not None and (time.time() - t_all) > budget:
-                print(f"  [跳过] 超出总时间预算（{budget}s），剩余 {total_runs - idx + 1} 次运行未执行", flush=True)
-                rec = RunRecord(
-                    task=task.name, variant=task.variant, run_index=k,
-                    passed=False, parse=None, compile=None, run=None, synth=None,
-                    dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
-                    error=f"跳过（超出总时间预算 {budget}s）",
-                )
-                rep.records.append(rec)
-                continue
-            print(f"  [{idx}/{total_runs}] {task.name}  第 {k}/{args.k} 轮 ...", flush=True)
-            try:
-                r = run_task(
-                    task=task,
-                    cfg=cfg,
-                    client=None,
-                    max_attempts=rep.attempts,
-                    do_synth=args.synth,
-                    mode=args.mode,
-                    verbose=False,
-                )
-                g = r.grade
-                rec = RunRecord(
-                    task=task.name,
-                    variant=task.variant,
-                    run_index=k,
-                    passed=r.passed,
-                    parse=g.parse,
-                    compile=g.compile,
-                    run=g.run,
-                    synth=g.synth,
-                    dump_ok=r.dump_ok,
-                    dump_detail=r.dump_detail,
-                    attempts=len(r.attempts),
-                    elapsed_s=r.elapsed_s,
-                    gen_time_s=r.gen_time_s,
-                )
-                print(
-                    f"          {'通过' if r.passed else '失败'}   "
-                    f"{g.as_row()}   {r.elapsed_s:.1f}s",
-                    flush=True,
-                )
-            except Exception as e:
-                rec = RunRecord(
-                    task=task.name,
-                    variant=task.variant,
-                    run_index=k,
-                    passed=False,
-                    parse=None, compile=None, run=None, synth=None,
-                    dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
-                    error=f"{type(e).__name__}: {e}",
-                )
-                print(f"          异常: {rec.error[:120]}", flush=True)
-            rep.records.append(rec)
+    # 评测的时间几乎全花在等模型响应（I/O 密集），Vitis 编译只占小头，
+    # 所以多题并行能近似线性提速。每题有独立工作目录，互不干扰。
+    specs = [
+        (idx, ti, task, k)
+        for idx, (ti, task, k) in enumerate(
+            ((ti, task, k) for ti, task in enumerate(tasks, 1) for k in range(1, args.k + 1)),
+            1,
+        )
+    ]
+    total_runs = len(specs)
+    lock = threading.Lock()
+    finished = 0
+
+    def _skip(task, k, reason):
+        return RunRecord(
+            task=task.name, variant=task.variant, run_index=k,
+            passed=False, parse=None, compile=None, run=None, synth=None,
+            dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
+            error=reason,
+        )
+
+    def run_one(idx: int, ti: int, task: ds.Task, k: int) -> RunRecord:
+        nonlocal finished
+        # 总时间预算：超时后剩余题目记为跳过，不再消耗模型额度和 Vitis 时间
+        if budget is not None and (time.time() - t_all) > budget:
+            return _skip(task, k, f"跳过（超出总时间预算 {budget}s）")
+
+        with lock:
+            print(f"  [{idx}/{total_runs}] 开始 {task.name} 第 {k}/{args.k} 轮 ...", flush=True)
+
+        try:
+            r = run_task(
+                task=task, cfg=cfg, client=None,
+                max_attempts=rep.attempts, do_synth=args.synth,
+                mode=args.mode, verbose=False,
+            )
+            g = r.grade
+            rec = RunRecord(
+                task=task.name, variant=task.variant, run_index=k,
+                passed=r.passed, parse=g.parse, compile=g.compile,
+                run=g.run, synth=g.synth,
+                dump_ok=r.dump_ok, dump_detail=r.dump_detail,
+                attempts=len(r.attempts), elapsed_s=r.elapsed_s,
+                gen_time_s=r.gen_time_s,
+            )
+        except Exception as e:
+            rec = RunRecord(
+                task=task.name, variant=task.variant, run_index=k,
+                passed=False, parse=None, compile=None, run=None, synth=None,
+                dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
+                error=f"{type(e).__name__}: {e}",
+            )
+
+        with lock:
+            finished += 1
+            print(
+                f"  [{finished}/{total_runs}] 完成 {task.name}  "
+                f"{'通过' if rec.passed else '失败'}  {rec.elapsed_s:.1f}s",
+                flush=True,
+            )
+        return rec
+
+    if jobs == 1:
+        records = [run_one(idx, ti, task, k) for idx, ti, task, k in specs]
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=jobs) as ex:
+            future_map = {
+                ex.submit(run_one, idx, ti, task, k): i
+                for i, (idx, ti, task, k) in enumerate(specs)
+            }
+            ordered: List[Optional[RunRecord]] = [None] * len(specs)
+            for fut in as_completed(future_map):
+                ordered[future_map[fut]] = fut.result()
+        records = [r for r in ordered if r is not None]
+
+    rep.records.extend(records)
+
 
     rep.total_elapsed_s = time.time() - t_all
     return rep
@@ -443,6 +465,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-total-time", type=int, default=0,
         help="整批评测的总时间预算（秒，默认 0 = 不限）。超时后剩余题目记为跳过",
     )
+    p.add_argument(
+        "--jobs", type=int, default=3,
+        help="并行跑的题目数（默认 3）。时间几乎全花在等模型响应，并行近似线性提速；"
+             "设为 1 即完全串行",
+    )
     return p
 
 
@@ -474,6 +501,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  HLS Agent 批量评测")
     print(SEP)
     print(f"  题目数   : {len(tasks)}   轮数 k = {args.k}   模式 = {args.mode}")
+    print(f"  并行度   : {args.jobs}   （时间主要花在等模型响应，并行近似线性提速）")
     print(f"  重试上限 : {1 if args.mode == 'baseline' else args.attempts}")
     print(f"  综合     : {'开' if args.synth else '关'}")
     print(f"  工作区   : {cfg.workspace}")
