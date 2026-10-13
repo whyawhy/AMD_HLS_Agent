@@ -261,38 +261,98 @@ def build_synth_tcl(
 # --------------------------------------------------------------------------
 
 
+def _kill_tree(p: subprocess.Popen) -> None:
+    """超时后终止整棵进程树。
+
+    `Popen.kill()` 只杀得掉直接子进程。vitis-run 会再拉起 clang / 综合器，
+    这些孙子进程会活下来继续吃 CPU——一次超时之后整批评测就被拖慢了。
+    Windows 上用 `taskkill /T` 连子孙一起收，POSIX 上先杀进程组。
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                capture_output=True, timeout=30,
+            )
+        else:
+            try:
+                os.killpg(os.getpgid(p.pid), 9)
+            except (OSError, AttributeError):
+                p.kill()
+    except Exception:
+        pass
+    try:
+        p.kill()
+    except Exception:
+        pass
+
+
 def _run(cmd: List[str], cwd: Path, timeout: int, env: Optional[dict] = None) -> ExecResult:
     t0 = time.time()
     try:
-        p = subprocess.run(
+        # 用 Popen 而不是 subprocess.run：超时需要拿到 pid 才能收拾整棵进程树
+        p = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
             env=env,
         )
-        return ExecResult(
-            return_code=p.returncode,
-            stdout=p.stdout or "",
-            stderr=p.stderr or "",
-            elapsed_s=time.time() - t0,
-        )
-    except subprocess.TimeoutExpired as e:
-        def dec(x):
-            if isinstance(x, bytes):
-                return x.decode("utf-8", errors="replace")
-            return x or ""
-
+    except OSError as e:
         return ExecResult(
             return_code=-1,
-            stdout=dec(e.stdout),
-            stderr=dec(e.stderr),
+            stderr=f"无法启动进程: {e}",
+            elapsed_s=time.time() - t0,
+        )
+
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return ExecResult(
+            return_code=p.returncode,
+            stdout=out or "",
+            stderr=err or "",
+            elapsed_s=time.time() - t0,
+        )
+    except subprocess.TimeoutExpired:
+        _kill_tree(p)
+        try:
+            out, err = p.communicate(timeout=30)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            out, err = "", ""
+        return ExecResult(
+            return_code=-1,
+            stdout=out or "",
+            stderr=(err or "") + f"\n[超时] 超过 {timeout}s，已终止进程树",
             elapsed_s=time.time() - t0,
             timeout=True,
         )
+
+
+def _run_exe_retrying(
+    exe: Path, cwd: Path, timeout: int, env: dict, attempts: int = 3
+) -> ExecResult:
+    """启动 csim.exe，对「缺 DLL 静默退出」重试几次。
+
+    实测同一份代码、同一台机器上，启动阶段偶尔会以 0xC0000135
+    (STATUS_DLL_NOT_FOUND) 退出且没有任何输出——Windows 上杀毒软件扫描刚链接
+    出来的可执行文件时就会出现这种"0.1 秒、零输出"的假崩溃。重试一次通常就正常。
+
+    但**真正的**数学库缺失（代码里用了 `sqrt()`/`std::sqrt()`，链到本机 Vitis
+    没有的 libhlsm/libhlsmc）会稳定复现，重试三次仍然失败——那种情况由上层
+    归类为环境受限并让模型改写，不在这里掩盖。每次重试只花约 0.1 秒。
+    """
+    last: Optional[ExecResult] = None
+    for i in range(attempts):
+        last = _run([str(exe)], cwd, timeout, env=env)
+        silent_dll_miss = last.return_code == 3221225781 and not (last.stdout or last.stderr)
+        if not silent_dll_miss:
+            return last
+        if i < attempts - 1:
+            time.sleep(0.5)
+    return last  # type: ignore[return-value]
 
 
 def csim_env(build_dir: Path, vitis_run: Path) -> dict:
@@ -367,8 +427,13 @@ def run_csim(
     part: str,
     clock_ns: float,
     timeout_s: int = 600,
+    compile_timeout_s: Optional[int] = None,
 ) -> HlsResult:
-    """编译 + 运行 testbench。对应用户要的「读文件、编译、仿真」。"""
+    """编译 + 运行 testbench。对应用户要的「读文件、编译、仿真」。
+
+    compile_timeout_s 与 timeout_s 分开：编译（csim_design -setup）正常几秒，
+    运行测试台可能因为用例规模大而慢，用同一个数字会两头不讨好。
+    """
     paths.workdir.mkdir(parents=True, exist_ok=True)
     tcl_name = "run_csim.tcl"
     (paths.workdir / tcl_name).write_text(
@@ -376,7 +441,11 @@ def run_csim(
     )
 
     t0 = time.time()
-    compile_res = _run(_vitis_cmd(vitis_run, tcl_name), paths.workdir, timeout_s)
+    compile_res = _run(
+        _vitis_cmd(vitis_run, tcl_name),
+        paths.workdir,
+        compile_timeout_s if compile_timeout_s else timeout_s,
+    )
 
     res = HlsResult(project_dir=paths.workdir, compile=compile_res, log=compile_res.stdout + compile_res.stderr)
 
@@ -407,12 +476,7 @@ def run_csim(
             except OSError:
                 pass
 
-    run_res = _run(
-        [str(exe)],
-        exe.parent,
-        timeout_s,
-        env=csim_env(exe.parent, vitis_run),
-    )
+    run_res = _run_exe_retrying(exe, exe.parent, timeout_s, csim_env(exe.parent, vitis_run))
     res.run = run_res
     res.log += "\n" + run_res.stdout + run_res.stderr
     res.dumps = parse_dumps(run_res.stdout + run_res.stderr + res.log)

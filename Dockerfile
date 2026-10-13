@@ -16,9 +16,17 @@ FROM ${BASE_IMAGE}
 # ---------------------------------------------------------------------------
 # Python 依赖
 # ---------------------------------------------------------------------------
-# 只依赖 requests；基础镜像若已提供 Python 则直接复用
-RUN python3 -m pip install --no-cache-dir "requests>=2.28" \
-    || pip install --no-cache-dir "requests>=2.28"
+# 只依赖 requests，**锁定版本**以保证不同时间构建出的镜像行为一致（可复现要求）。
+# 若基础镜像已经带了同版本 requests，pip 会直接跳过，无需联网。
+#
+# ⚠️ 断网构建：若基础镜像里没有 requests，下面的 pip 需要能访问 PyPI。
+#    要真正离线构建，先把 wheel 放进构建上下文再改成本地安装：
+#        COPY wheels/ /wheels/
+#        RUN python3 -m pip install --no-index --find-links=/wheels -r requirements.txt
+#    默认走联网路径；正式提交前必须在赛事方规定的基础镜像上实测一次。
+ARG REQUESTS_VERSION=2.32.3
+RUN python3 -m pip install --no-cache-dir "requests==${REQUESTS_VERSION}" \
+    || pip install --no-cache-dir "requests==${REQUESTS_VERSION}"
 
 # ---------------------------------------------------------------------------
 # 代码

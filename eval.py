@@ -32,6 +32,7 @@ import statistics
 import sys
 import threading
 import time
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -39,6 +40,8 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hls_agent import dataset as ds  # noqa: E402
+from hls_agent.config import _int_env as _env_int  # noqa: E402
+from hls_agent.errors import describe as err_desc, hint as err_hint, is_retryable  # noqa: E402
 from hls_agent.config import (  # noqa: E402
     DEFAULT_CLOCK_NS,
     DEFAULT_PART,
@@ -75,11 +78,13 @@ class RunRecord:
     elapsed_s: float = 0.0
     gen_time_s: float = 0.0
     error: str = ""
-
-    @property
-    def level(self) -> str:
-        g = Grade(parse=self.parse, compile=self.compile, run=self.run, synth=self.synth)
-        return g.highest
+    # ---- 结构化失败证据（原来只有自由文本，导致报告里全是"详见 results.json"）----
+    level: str = "未开始"          # 最高级别，落盘（原来只是 @property，asdict 丢掉了）
+    failure_kind: str = ""         # 最终失败类别，见 hls_agent/errors.py
+    failure_detail: str = ""       # 一句根因
+    failure_sequence: List[str] = field(default_factory=list)  # 每次尝试分别卡在哪
+    return_code: Optional[int] = None
+    code_hash: str = ""
 
 
 @dataclass
@@ -180,8 +185,11 @@ def _cfg(args: argparse.Namespace) -> AgentConfig:
         clock_ns=DEFAULT_CLOCK_NS if args.clock is None else args.clock,
         workspace=ws,
         vitis_run=find_vitis_run(args.vitis),
-        csim_timeout_s=args.csim_timeout,
-        csynth_timeout_s=args.synth_timeout,
+        # 命令行没给就用环境变量/默认值（HLS_AGENT_*_TIMEOUT），
+        # 这样超时配置只有一处来源，不会散落在多个模块里
+        compile_timeout_s=args.compile_timeout or _env_int("HLS_AGENT_COMPILE_TIMEOUT", 600),
+        csim_timeout_s=args.csim_timeout or _env_int("HLS_AGENT_CSIM_TIMEOUT", 240),
+        csynth_timeout_s=args.synth_timeout or _env_int("HLS_AGENT_SYNTH_TIMEOUT", 1800),
         verbose=False,
         strict_dump=not args.official_pass,
         llm=LLMConfig.from_env(),
@@ -289,6 +297,12 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
                 dump_ok=r.dump_ok, dump_detail=r.dump_detail,
                 attempts=len(r.attempts), elapsed_s=r.elapsed_s,
                 gen_time_s=r.gen_time_s,
+                level=g.highest,
+                failure_kind=r.failure_kind,
+                failure_detail=r.failure_detail,
+                failure_sequence=[a.failure_kind for a in r.attempts if a.failure_kind],
+                return_code=r.return_code,
+                code_hash=r.code_hash,
             )
         except Exception as e:
             rec = RunRecord(
@@ -296,6 +310,7 @@ def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -
                 passed=False, parse=None, compile=None, run=None, synth=None,
                 dump_ok=False, attempts=0, elapsed_s=0.0, gen_time_s=0.0,
                 error=f"{type(e).__name__}: {e}",
+                failure_kind="UNKNOWN_ERROR", failure_detail=str(e)[:200],
             )
 
         with lock:
@@ -341,7 +356,16 @@ def render_summary(rep: EvalReport) -> str:
     L.append(f"- 时间：{rep.started_at}")
     L.append(f"- 模式：**{rep.mode}**（{'单次生成、不重试、不看工具反馈' if rep.mode == 'baseline' else f'带工具反馈，失败重试至多 {rep.attempts} 次'}）")
     L.append(f"- 采样轮数 k：{rep.k}")
-    L.append(f"- 是否评估综合：{'是' if rep.do_synth else '否'}")
+    # 把两种"次数"讲清楚，避免把内部重试当成独立采样：
+    # pass@k 用的是 k 次**独立生成**（每次都是全新采样，温度同配置）；
+    # 而 agent 模式每题内部还会失败重试至多 attempts 次，那是同一次采样里的修复过程。
+    if rep.k > 1:
+        L.append(
+            f"  - `pass@{rep.k}` 按 {rep.k} 次**独立生成**统计；"
+            f"每题内部的失败重试（至多 {rep.attempts} 次）属于同一次采样的修复过程，"
+            f"不计入 k。"
+        )
+    L.append(f"- 是否评估综合：{'是' if rep.do_synth else '否（未跑综合的题在分级里显示「略过」，不会被当成「综合通过」）'}")
     L.append(
         f"- 判定口径：{'官方（只认 csim 返回码）' if rep.official_pass else '严格（数值与参考 dump 一致才算通过）'}"
     )
@@ -421,16 +445,34 @@ def render_summary(rep: EvalReport) -> str:
     if fails:
         L.append("## 失败分析")
         L.append("")
-        L.append("| 题目 | 轮次 | 卡在哪一级 | 原因摘要 |")
-        L.append("| --- | --- | --- | --- |")
-        seen = set()
+        # 按结构化类别统计——这是原来完全缺失的一环：
+        # 之前报告里 24 行失败全写成"详见 results.json"，而 results.json 里没有原因。
+        kinds: Dict[str, int] = {}
         for r in fails:
-            key = (r.task, r.level)
-            if key in seen:
-                continue
-            seen.add(key)
-            reason = r.error[:120] if r.error else "编译/仿真未通过，详见 results.json"
-            L.append(f"| {r.task} | {r.run_index} | {r.level} | {reason} |")
+            kinds[r.failure_kind or "UNKNOWN_ERROR"] = kinds.get(r.failure_kind or "UNKNOWN_ERROR", 0) + 1
+        L.append("### 失败类别分布")
+        L.append("")
+        L.append("| 失败类别 | 题数 | 是否值得重试 | 修复方向 |")
+        L.append("| --- | --- | --- | --- |")
+        for kind, cnt in sorted(kinds.items(), key=lambda kv: -kv[1]):
+            L.append(
+                f"| `{kind}`（{err_desc(kind)}） | {cnt} | "
+                f"{'是' if is_retryable(kind) else '否'} | {err_hint(kind)} |"
+            )
+        L.append("")
+
+        L.append("### 逐题明细")
+        L.append("")
+        L.append("| 题目 | 轮次 | 卡在哪一级 | 失败类别 | 尝试 | 每次尝试卡在哪 | 原因摘要 |")
+        L.append("| --- | --- | --- | --- | --- | --- | --- |")
+        for r in sorted(fails, key=lambda x: (x.variant, x.task)):
+            seq = " → ".join(r.failure_sequence) or "-"
+            detail = (r.failure_detail or r.dump_detail or r.error or "-")
+            detail = re.sub(r"\s+", " ", detail)[:160].replace("|", "/")
+            L.append(
+                f"| {r.task} | {r.run_index} | {r.level} | `{r.failure_kind or 'UNKNOWN_ERROR'}` | "
+                f"{r.attempts} | {seq} | {detail} |"
+            )
         L.append("")
 
     return "\n".join(L)
@@ -482,8 +524,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--vitis", help="vitis-run 路径（默认自动查找）")
     p.add_argument("--part", default=None, help="目标器件")
     p.add_argument("--clock", type=float, default=None, help="时钟周期 ns")
-    p.add_argument("--csim-timeout", type=int, default=240)
-    p.add_argument("--synth-timeout", type=int, default=1800)
+    p.add_argument(
+        "--csim-timeout", type=int, default=None,
+        help="运行 testbench 的超时（秒）。默认取 HLS_AGENT_CSIM_TIMEOUT，再默认 240",
+    )
+    p.add_argument(
+        "--compile-timeout", type=int, default=None,
+        help="编译阶段的超时（秒）。默认取 HLS_AGENT_COMPILE_TIMEOUT，再默认 600",
+    )
+    p.add_argument(
+        "--synth-timeout", type=int, default=None,
+        help="综合的超时（秒）。默认取 HLS_AGENT_SYNTH_TIMEOUT，再默认 1800",
+    )
     p.add_argument(
         "--max-total-time", type=int, default=0,
         help="整批评测的总时间预算（秒，默认 0 = 不限）。超时后剩余题目记为跳过",

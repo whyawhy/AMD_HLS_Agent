@@ -435,14 +435,23 @@ def _default_vitis_run() -> Optional[Path]:
         return None
 
 
+def _int_env(name: str, fallback: int) -> int:
+    """读一个整型环境变量，非数字或未设置时用 fallback。"""
+    raw = os.environ.get(name, "")
+    return int(raw) if raw.isdigit() else fallback
+
+
 @dataclass
 class AgentConfig:
     part: str = DEFAULT_PART
     clock_ns: float = DEFAULT_CLOCK_NS
     workspace: Path = field(default_factory=resolve_workspace)
     vitis_run: Optional[Path] = field(default_factory=_default_vitis_run)
-    csim_timeout_s: int = 240
-    csynth_timeout_s: int = 1800
+    # 编译与运行分开设超时：csim_design -setup 只编译，正常几秒（MachSuite 的大内核
+    # 也就几十秒）；而跑测试台可能因为用例规模大而慢。合成一个数字会两头不讨好。
+    compile_timeout_s: int = field(default_factory=lambda: _int_env("HLS_AGENT_COMPILE_TIMEOUT", 600))
+    csim_timeout_s: int = field(default_factory=lambda: _int_env("HLS_AGENT_CSIM_TIMEOUT", 240))
+    csynth_timeout_s: int = field(default_factory=lambda: _int_env("HLS_AGENT_SYNTH_TIMEOUT", 1800))
     verbose: bool = False
     # 严格判定：数值与参考 dump 一致才算通过（官方只认 csim 返回码，
     # 但 dump 型 testbench 不检查数值，功能错误的代码也会「可运行」）

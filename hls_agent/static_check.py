@@ -49,6 +49,15 @@ _FUNC_DEF = re.compile(
     re.DOTALL,
 )
 
+# 头文件里 typedef 出来的类型名。生成代码若用 #define 去改写它们，
+# 会把 Vitis 自己的头（ap_fixed.h 等）一起改坏。
+# 实测：某次生成的 gemver.cpp 第一行就是 `#define ap_fixed MY_AP_FIXED`，
+# 第二行才 include 题目头文件——属于必然出错的写法。
+_TYPEDEF_NAME = re.compile(r"\btypedef\b[^;]*?\b([A-Za-z_]\w*)\s*;")
+
+# 整行只有省略号 = 模型写了骨架没写实现（也是输出被截断的指纹）
+_ELLIPSIS_LINE = re.compile(r"^\s*(?:\.\.\.|…|\.\.\.;)\s*$", re.MULTILINE)
+
 
 def _strip_comments(src: str) -> str:
     src = re.sub(r"/\*.*?\*/", " ", src, flags=re.DOTALL)
@@ -186,6 +195,25 @@ def check(source: Path | str, header_path: Optional[Path | str], top: str) -> Ch
     for pat, msg in WARNINGS:
         if pat.search(code):
             res.warnings.append(msg)
+
+    # 4b. 骨架片段：整行省略号说明没写实现（输出被截断的指纹）
+    if _ELLIPSIS_LINE.search(src):
+        res.blockers.append(
+            "代码里有整行 `...`，这是只写了骨架、没有实现——"
+            "请输出完整实现，不要用省略号略过任何函数体"
+        )
+
+    # 4c. 用宏改写题目头文件的类型名，必然把 Vitis 自己的头也改坏
+    if header_path is not None:
+        hdr_text = Path(header_path).read_text(encoding="utf-8", errors="replace")
+        names = set(_TYPEDEF_NAME.findall(hdr_text))
+        names |= {"ap_fixed", "ap_ufixed", "ap_int", "ap_uint", "ap_float"}
+        for name in sorted(names):
+            if re.search(rf"^\s*#\s*define\s+{re.escape(name)}\b", src, re.MULTILINE):
+                res.blockers.append(
+                    f"用 `#define {name} ...` 改写了题目头文件里的类型名 {name}，"
+                    f"这会把 Vitis 自己的头文件一起改坏；请直接使用原类型名"
+                )
 
     # 5. 除法无保护（运行时除零会直接崩掉 csim）
     if _division_unprotected(code):

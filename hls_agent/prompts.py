@@ -211,6 +211,12 @@ Here is the code you generated last time:
 Fix the problem and output the complete `{source_name}` again, following the same
 `<OUTPUT_CODE name="{source_name}">` XML format as before. Output the whole file, not a diff.
 Do not modify the header file or the testbench — only the kernel implementation.
+
+**Output only the code block.** Your reply must begin with
+`<OUTPUT_CODE name="{source_name}">` and end with
+`</OUTPUT_CODE name="{source_name}">`. Do not write any analysis, explanation,
+plan, or markdown fence around it — analysis text is not part of the design and
+it has already caused replies to be cut off before the code was emitted.
 """
 ).strip()
 
@@ -247,6 +253,45 @@ def build_format_retry_prompt(base_prompt: str, reason: str, source_name: str) -
     """模型没按格式输出时的重试提示（还没轮到编译，纯格式问题）。"""
     return base_prompt + "\n\n" + FORMAT_RETRY_SUFFIX.format(
         reason=reason.strip(), source_name=source_name
+    ) + "\n"
+
+
+NO_PROGRESS_SUFFIX = dedent(
+    """
+## No Change Detected
+
+The implementation you just returned is **byte-for-byte identical** to the one
+that already failed, so it was not sent to the toolchain again. Re-submitting the
+same code cannot produce a different result.
+
+The most recent failure evidence:
+
+```
+{errors}
+```
+
+The code you returned (unchanged):
+
+```
+{prev_code}
+```
+
+You must actually change the implementation. Read the failure evidence above
+again and alter the code so that the specific reported problem is fixed — not a
+cosmetic edit. If you believe the previous code was correct, then the problem is
+in a part you have not touched yet (numerical type/width, loop bounds, the exact
+operation order, or a boundary case).
+
+Output the complete `{source_name}` inside the same
+`<OUTPUT_CODE name="{source_name}">` XML format, and output nothing else.
+"""
+).strip()
+
+
+def build_no_progress_prompt(base_prompt: str, errors: str, prev_code: str, source_name: str) -> str:
+    """模型重试时原样返回了同一份代码——明确告诉它"没变化"并要它真的改。"""
+    return base_prompt + "\n\n" + NO_PROGRESS_SUFFIX.format(
+        errors=errors.strip(), prev_code=prev_code.strip(), source_name=source_name
     ) + "\n"
 
 

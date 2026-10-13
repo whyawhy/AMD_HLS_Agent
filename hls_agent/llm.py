@@ -26,16 +26,32 @@ __all__ = [
     "LLMClient",
     "LLMError",
     "BackendError",
+    "OutputTruncated",
     "extract_output_code_xml",
     "extract_fenced_by_name",
     "extract_code_blocks",
     "extract_source",
+    "looks_incomplete",
     "unescape_xml_entities",
 ]
 
 
 class LLMError(RuntimeError):
     pass
+
+
+class OutputTruncated(ValueError):
+    """模型输出被截断或不完整，抽取到的不是完整实现。
+
+    为什么需要单独一类：模型的回复超出 ``max_tokens`` 时，会在写到一半的地方
+    断掉。此时输出里既没有 ``<OUTPUT_CODE>`` 标签、也没有完整函数体，
+    抽取器一旦回退到"随便找个含顶层函数名的围栏代码块"，就会把模型**讲解时
+    随手贴的示意片段**当成实现写进磁盘——那段代码必然编译失败或跑出错误结果，
+    而且会让评测误以为是模型能力不足。
+
+    实测（dfadd，批次 20261012_130807）：59055 字符的回复里 0 个
+    ``<OUTPUT_CODE>`` 标签，抽取器取出 774 字符、含字面 ``...`` 的残片。
+    """
 
 
 # --------------------------------------------------------------------------
@@ -200,6 +216,21 @@ def _looks_like_cpp(body: str) -> bool:
     return has_brace and has_semi
 
 
+# 整行只有省略号 = 模型用"省略后续"的方式写了个骨架，不是可编译的实现。
+# 真实的 HLS 内核里不会出现这样的行（可变参数 `printf(const char*, ...)`
+# 那一行的 stripped 内容不是孤立的 `...`，不会误判）。
+_ELLIPSIS_LINE = re.compile(r"^\s*(?:\.\.\.|…|\.\.\.;)\s*$", re.MULTILINE)
+
+
+def looks_incomplete(code: str) -> Optional[str]:
+    """判断抽出的代码像不像"写了一半的片段"，返回原因；完整则返回 None。"""
+    if not code.strip():
+        return "抽取结果为空"
+    if _ELLIPSIS_LINE.search(code):
+        return "代码里有整行省略号（`...`），说明这只是一个骨架片段，不是完整实现"
+    return None
+
+
 def extract_source(text: str, want: str, top: str = "") -> str:
     """从模型输出里取出内核 .cpp 的内容。
 
@@ -211,8 +242,27 @@ def extract_source(text: str, want: str, top: str = "") -> str:
       5. 整段文本本身就是 C++ 的情况
 
     无论走哪条路径，最后都做一次 XML 反转义（模型写 XML 时会把尖括号转义）。
+
+    完整性把关：一旦发现回复被截断（有开标签无闭标签）或抽到的是含 ``...``
+    的骨架片段，抛 :class:`OutputTruncated` 而不是把残片交给下游——
+    否则残片会被写进磁盘送去 Vitis，白白浪费一次编译仿真，还会被误判成
+    "模型能力不足"。
     """
-    return unescape_xml_entities(_extract_source_raw(text, want, top))
+    if "<OUTPUT_CODE" in text and "</OUTPUT_CODE" not in text:
+        raise OutputTruncated(
+            "模型输出被截断：出现了 <OUTPUT_CODE 开标签但没有对应闭标签，"
+            "说明正文写到一半就到 max_tokens 上限了"
+        )
+
+    code = unescape_xml_entities(_extract_source_raw(text, want, top))
+
+    why = looks_incomplete(code)
+    if why:
+        raise OutputTruncated(
+            f"抽取到的 {want} 不完整：{why}。"
+            f"（多半是模型把代码写在分析文字里、或输出被 max_tokens 截断）"
+        )
+    return code
 
 
 def _extract_source_raw(text: str, want: str, top: str = "") -> str:

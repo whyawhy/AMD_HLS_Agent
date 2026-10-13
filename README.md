@@ -187,7 +187,7 @@ AMD_HLS_Agent/              # 项目根目录
 ├── README.md               # 本说明文件
 ├── hls_agent.py            # 程序入口：单题读题 → 生成 → 验证
 ├── eval.py                 # 批量评测：pass@k、分组通过率、墙钟效率
-├── validate.py             # 离线模板生成代码的静态校验
+├── validate.py             # 离线模板生成代码的静态校验（仅适用于离线题库产出的工程，见文件头）
 ├── run.sh                  # 单题入口（智能体模式，评测方调用）
 ├── run_baseline.sh         # 基线入口（单次生成、不重试、不调用工具）
 ├── Dockerfile              # 提交用容器（基于赛事方官方基础镜像）
@@ -196,11 +196,12 @@ AMD_HLS_Agent/              # 项目根目录
 │   ├── cli.py              # 命令行界面（读题、生成、跑 Vitis 的流程控制）
 │   ├── config.py           # 自动查找 Vitis、工作区、模型接入配置
 │   ├── backends.py         # 可插拔模型后端（Ollama / OpenAI 兼容 / Anthropic 兼容）
-│   ├── llm.py              # 模型调用门面 + 输出代码抽取（五级回退）
+│   ├── llm.py              # 模型调用门面 + 输出代码抽取（含截断/骨架完整性把关）
+│   ├── errors.py           # 失败分类（16 类，含是否值得重试与修复方向）
 │   ├── dataset.py          # HLS-Eval 数据集扫描与题目读取
 │   ├── vitis.py            # 驱动 Vitis HLS 编译/仿真/综合 + 四级判定
 │   ├── prompts.py          # 提示词（对齐官方 HLS-Eval 协议）
-│   ├── runner.py           # 单题编排：生成 → 验证 → 失败重试
+│   ├── runner.py           # 单题编排：生成 → 验证 → 失败分类重试 → 取最优尝试
 │   ├── knowledge_base.py   # 内置离线题库（12 类标准题模板）
 │   ├── matcher.py          # 题目识别与参数抽取
 │   ├── codegen.py          # 离线模板代码生成器
@@ -216,11 +217,15 @@ AMD_HLS_Agent/              # 项目根目录
 ├── skill/                  # 技能包：提示词、校验脚本、踩坑清单
 │   ├── prompt_guide.md     # 提示词模板设计说明
 │   ├── check_generated.py  # 生成代码静态预检（省 Vitis 时间）
-│   └── pitfalls.md         # 踩坑清单（现象 / 根因 / 规避）
+│   ├── analyze_failures.py # 一批评测的失败归类（按结构化失败类别）
+│   ├── compare_runs.py     # 智能体 vs 基线的增益对照
+│   ├── README.md           # 技能包使用说明与规则提炼流程
+│   └── pitfalls.md         # 踩坑清单（现象 / 根因 / 规避 / 适用范围）
 │
 ├── model/
 │   └── MODEL.md            # 模型声明（来源、量化、显存、上下文）
 │
+├── selftest.py             # 回归自测（改代码后跑一遍防复发）
 ├── 题库示例.txt            # 离线题库的示例题目
 ├── requirements.txt        # Python 依赖清单
 └── .gitignore              # Git 忽略规则（不提交游戏/会话/生成产物等）
