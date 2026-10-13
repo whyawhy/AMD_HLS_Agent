@@ -203,6 +203,29 @@ def _select_tasks(d: ds.HlsEvalDataset, args: argparse.Namespace) -> List[ds.Tas
     return all_tasks
 
 
+def _warmup_model(cfg: AgentConfig) -> None:
+    """评测开始前预热模型。
+
+    本地大模型首次调用要加载权重（实测 32B 约 160 秒），如果不预热，
+    这笔成本会算在第一道题的「生成耗时」里，看起来像那道题特别慢。
+    预热后每道题的耗时都是纯推理时间，统计才有意义。
+    """
+    try:
+        from hls_agent.config import LLMConfig
+        from hls_agent.llm import LLMClient
+
+        client = LLMClient(LLMConfig.from_env())
+        print("  预热模型（首次加载本地大模型可能要 1~3 分钟）...", flush=True)
+        t0 = time.time()
+        client.complete("", [{"role": "user", "content": "hi"}], max_tokens=8)
+        dt = time.time() - t0
+        st = client.last_stats
+        extra = f"，加载占 {st['load_s']:.0f}s" if st.get("load_s", 0) > 2 else "（模型已在显存）"
+        print(f"  预热完成（{dt:.0f}s{extra}）", flush=True)
+    except Exception as e:
+        print(f"  预热失败（不影响评测）: {type(e).__name__}: {str(e)[:80]}", flush=True)
+
+
 def evaluate(tasks: List[ds.Task], cfg: AgentConfig, args: argparse.Namespace) -> EvalReport:
     rep = EvalReport(
         mode=args.mode,
@@ -511,6 +534,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  机器     : {platform.platform()}")
     print(SEP)
     print()
+
+    _warmup_model(cfg)
 
     rep = evaluate(tasks, cfg, args)
 
