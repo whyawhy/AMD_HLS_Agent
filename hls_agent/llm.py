@@ -83,7 +83,8 @@ def _make_backend(cfg: LLMConfig) -> LLMBackend:
     kind = (cfg.backend or "auto").lower()
 
     if kind == "ollama":
-        return OllamaBackend(host=cfg.ollama_host, **common)
+        return OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx,
+                             keep_alive=cfg.ollama_keep_alive, **common)
     if kind in ("openai", "vllm"):
         return OpenAIBackend(base_url=cfg.openai_base_url, api_key=cfg.api_key or "not-needed", **common)
     if kind == "anthropic":
@@ -91,7 +92,8 @@ def _make_backend(cfg: LLMConfig) -> LLMBackend:
 
     # auto：本地优先（赛道要求本地开源权重），再退回远程兼容端点
     candidates: List[LLMBackend] = [
-        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx, **common),
+        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx,
+                      keep_alive=cfg.ollama_keep_alive, **common),
         OpenAIBackend(base_url=cfg.openai_base_url, api_key="not-needed", **common),
         AnthropicBackend(base_url=cfg.base_url, api_key=cfg.api_key, **common),
     ]
@@ -121,7 +123,8 @@ def probe_backends(cfg: LLMConfig) -> List[tuple[str, bool, str]]:
                   thinking=cfg.thinking)
     out = []
     for b in (
-        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx, **common),
+        OllamaBackend(host=cfg.ollama_host, num_ctx=cfg.ollama_num_ctx,
+                      keep_alive=cfg.ollama_keep_alive, **common),
         OpenAIBackend(base_url=cfg.openai_base_url, api_key="not-needed", **common),
         AnthropicBackend(base_url=cfg.base_url, api_key=cfg.api_key, **common),
     ):

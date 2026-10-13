@@ -227,10 +227,11 @@ def test_synth_tcl_separates_testbench() -> None:
 # ---------------------------------------------------------------------------
 
 def test_ollama_sends_num_ctx() -> None:
-    """必须显式传 num_ctx，否则 Ollama 用默认值截断长提示词。"""
+    """必须显式传 num_ctx（否则提示词被截断）和 keep_alive（否则每次重加载模型）。"""
     from hls_agent.backends import OllamaBackend
 
-    b = OllamaBackend(model="m", num_ctx=8192, max_tokens=64, timeout_s=5)
+    b = OllamaBackend(model="m", num_ctx=8192, keep_alive="2h",
+                      max_tokens=64, timeout_s=5)
     captured: dict = {}
 
     def fake_post(url, payload, headers, retries=3):
@@ -240,6 +241,7 @@ def test_ollama_sends_num_ctx() -> None:
     b._post = fake_post  # type: ignore[method-assign]
     b.complete("", [{"role": "user", "content": "hi"}])
     assert captured.get("options", {}).get("num_ctx") == 8192, captured.get("options")
+    assert captured.get("keep_alive") == "2h", captured.get("keep_alive")
 
 
 def test_ollama_captures_timing_stats() -> None:

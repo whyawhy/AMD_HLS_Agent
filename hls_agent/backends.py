@@ -239,12 +239,15 @@ class OllamaBackend(LLMBackend):
     name = "ollama"
 
     def __init__(self, host: str = "http://127.0.0.1:11434",
-                 num_ctx: int = 16384, **kw):
+                 num_ctx: int = 16384, keep_alive: str = "1h", **kw):
         super().__init__(**kw)
         self.host = host.rstrip("/")
         # 必须显式设置：Ollama 默认上下文只有 2048/4096，而完整提示词
         # 实测可到 5000+ tokens，不设会被静默截断（模型看不到完整测试台）
         self.num_ctx = num_ctx
+        # 模型在显存里的驻留时长。本地大模型重新加载一次要 100~200 秒，
+        # 批量跑题时必须让它常驻，否则每题都重付一次加载成本。
+        self.keep_alive = keep_alive
 
     def endpoint(self) -> str:
         return f"{self.host}/api/chat"
@@ -295,6 +298,8 @@ class OllamaBackend(LLMBackend):
             "model": self.model,
             "messages": msgs,
             "stream": False,
+            # 让模型在显存里常驻（默认 5 分钟就卸载，重加载一次要 100~200s）
+            "keep_alive": self.keep_alive,
             "options": {
                 "num_predict": max_tokens or self.max_tokens,
                 "temperature": self.temperature if temperature is None else temperature,

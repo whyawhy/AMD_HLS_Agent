@@ -328,6 +328,9 @@ class LLMConfig:
     # 而完整提示词（题面+测试台+头文件+技能包）实测可到 5000+ tokens，
     # 不设会被静默截断——模型看不到完整测试台，生成的代码自然离谱。
     ollama_num_ctx: int = 16384
+    # 模型在显存里保留多久。本地 32B 模型重新加载一次要约 150 秒
+    # （实测：首次生成 179s，模型驻留后只要 15.8s），批量评测时必须让它常驻。
+    ollama_keep_alive: str = "1h"
     openai_base_url: str = DEFAULT_OPENAI_BASE_URL
     base_url: str = DEFAULT_LLM_BASE_URL  # anthropic 兼容端点
     api_key: str = ""
@@ -408,6 +411,7 @@ class LLMConfig:
             thinking=os.environ.get("HLS_AGENT_THINKING", "off"),
             ollama_host=os.environ.get("HLS_AGENT_OLLAMA_HOST", DEFAULT_OLLAMA_HOST).rstrip("/"),
             ollama_num_ctx=_int_env("HLS_AGENT_OLLAMA_NUM_CTX", 16384),
+            ollama_keep_alive=os.environ.get("HLS_AGENT_OLLAMA_KEEP_ALIVE", "1h"),
             openai_base_url=os.environ.get(
                 "HLS_AGENT_OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL
             ).rstrip("/"),
